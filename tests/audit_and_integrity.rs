@@ -12,13 +12,13 @@ use craton_hsm::crypto::self_test;
 
 #[test]
 fn test_audit_log_new_is_empty() {
-    let log = AuditLog::new();
+    let log = AuditLog::new().unwrap();
     assert_eq!(log.entry_count(), 0, "New audit log should be empty");
 }
 
 #[test]
 fn test_audit_log_record_increments_count() {
-    let log = AuditLog::new();
+    let log = AuditLog::new().unwrap();
     log.record(1, AuditOperation::Initialize, AuditResult::Success, None)
         .unwrap();
     log.flush();
@@ -27,7 +27,7 @@ fn test_audit_log_record_increments_count() {
 
 #[test]
 fn test_audit_log_multiple_entries() {
-    let log = AuditLog::new();
+    let log = AuditLog::new().unwrap();
     log.record(1, AuditOperation::Initialize, AuditResult::Success, None)
         .unwrap();
     log.record(
@@ -54,7 +54,7 @@ fn test_audit_log_multiple_entries() {
 
 #[test]
 fn test_audit_log_failure_event() {
-    let log = AuditLog::new();
+    let log = AuditLog::new().unwrap();
     log.record(
         1,
         AuditOperation::Login { user_type: 1 },
@@ -68,7 +68,7 @@ fn test_audit_log_failure_event() {
 
 #[test]
 fn test_audit_log_all_operation_types() {
-    let log = AuditLog::new();
+    let log = AuditLog::new().unwrap();
     log.record(1, AuditOperation::Initialize, AuditResult::Success, None)
         .unwrap();
     log.record(1, AuditOperation::Finalize, AuditResult::Success, None)
@@ -205,7 +205,7 @@ fn test_audit_log_all_operation_types() {
 
 #[test]
 fn test_audit_log_fips_non_approved() {
-    let log = AuditLog::new();
+    let log = AuditLog::new().unwrap();
     log.record(
         1,
         AuditOperation::Sign {
@@ -222,7 +222,7 @@ fn test_audit_log_fips_non_approved() {
 
 #[test]
 fn test_audit_log_with_key_id() {
-    let log = AuditLog::new();
+    let log = AuditLog::new().unwrap();
     log.record(
         1,
         AuditOperation::GenerateKey {
@@ -239,7 +239,7 @@ fn test_audit_log_with_key_id() {
 
 #[test]
 fn test_audit_log_different_sessions() {
-    let log = AuditLog::new();
+    let log = AuditLog::new().unwrap();
     log.record(1, AuditOperation::Initialize, AuditResult::Success, None)
         .unwrap();
     log.record(2, AuditOperation::Initialize, AuditResult::Success, None)
@@ -257,7 +257,7 @@ fn test_audit_log_different_sessions() {
 
 #[test]
 fn test_audit_log_rapid_recording() {
-    let log = AuditLog::new();
+    let log = AuditLog::new().unwrap();
     for i in 0..100 {
         log.record(
             i as u64,
@@ -277,7 +277,7 @@ fn test_audit_log_rapid_recording() {
 
 #[test]
 fn test_audit_log_get_entries() {
-    let log = AuditLog::new();
+    let log = AuditLog::new().unwrap();
     log.record(1, AuditOperation::Initialize, AuditResult::Success, None)
         .unwrap();
     log.record(
@@ -295,7 +295,7 @@ fn test_audit_log_get_entries() {
 
 #[test]
 fn test_audit_log_get_recent_entries() {
-    let log = AuditLog::new();
+    let log = AuditLog::new().unwrap();
     for i in 0..10 {
         log.record(
             i,
@@ -314,7 +314,7 @@ fn test_audit_log_get_recent_entries() {
 
 #[test]
 fn test_audit_log_export_json() {
-    let log = AuditLog::new();
+    let log = AuditLog::new().unwrap();
     log.record(1, AuditOperation::Initialize, AuditResult::Success, None)
         .unwrap();
     log.flush();
@@ -326,7 +326,7 @@ fn test_audit_log_export_json() {
 
 #[test]
 fn test_audit_log_export_ndjson() {
-    let log = AuditLog::new();
+    let log = AuditLog::new().unwrap();
     log.record(1, AuditOperation::Initialize, AuditResult::Success, None)
         .unwrap();
     log.record(
@@ -351,7 +351,7 @@ fn test_audit_log_export_ndjson() {
 
 #[test]
 fn test_audit_log_export_syslog() {
-    let log = AuditLog::new();
+    let log = AuditLog::new().unwrap();
     log.record(
         42,
         AuditOperation::Sign {
@@ -382,13 +382,13 @@ fn test_audit_log_export_syslog() {
 
 #[test]
 fn test_audit_log_verify_chain_empty() {
-    let log = AuditLog::new();
+    let log = AuditLog::new().unwrap();
     assert_eq!(log.verify_chain(), Ok(0));
 }
 
 #[test]
 fn test_audit_log_verify_chain_valid() {
-    let log = AuditLog::new();
+    let log = AuditLog::new().unwrap();
     log.record(1, AuditOperation::Initialize, AuditResult::Success, None)
         .unwrap();
     log.record(
@@ -414,14 +414,14 @@ fn test_audit_log_verify_chain_valid() {
 
 #[test]
 fn test_audit_log_export_json_empty() {
-    let log = AuditLog::new();
+    let log = AuditLog::new().unwrap();
     let json = log.export_json();
     assert_eq!(json.trim(), "[]");
 }
 
 #[test]
 fn test_audit_log_export_ndjson_empty() {
-    let log = AuditLog::new();
+    let log = AuditLog::new().unwrap();
     let ndjson = log.export_ndjson();
     assert_eq!(ndjson, "");
 }

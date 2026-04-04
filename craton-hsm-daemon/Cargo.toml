@@ -23,9 +23,15 @@ rustls-pemfile = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
 toml = "1"
 zeroize = "1"
 async-stream = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
 
 [build-dependencies]
 tonic-prost-build = "0.14"

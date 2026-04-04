@@ -125,3 +125,89 @@ pub fn generate_ed25519_key_pair() -> HsmResult<(RawKeyMaterial, Vec<u8>)> {
         verifying_key.to_bytes().to_vec(),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_aes_key_lengths() {
+        // Valid lengths succeed
+        assert!(generate_aes_key(16, false).is_ok());
+        assert!(generate_aes_key(24, false).is_ok());
+        assert!(generate_aes_key(32, false).is_ok());
+
+        // Invalid lengths fail
+        assert!(generate_aes_key(15, false).is_err());
+        assert!(generate_aes_key(20, false).is_err());
+        assert!(generate_aes_key(33, false).is_err());
+    }
+
+    #[test]
+    fn test_fips_rejects_aes128() {
+        let result = generate_aes_key(16, true);
+        assert!(result.is_err());
+        // AES-256 should still work in FIPS mode
+        assert!(generate_aes_key(32, true).is_ok());
+    }
+
+    #[test]
+    fn test_rsa_valid_sizes() {
+        // 2048, 3072, 4096 succeed (only test 2048 to keep test fast)
+        let (priv_key, modulus, pub_exp) = generate_rsa_key_pair(2048, false).unwrap();
+        assert!(!priv_key.is_empty());
+        assert!(!modulus.is_empty());
+        assert!(!pub_exp.is_empty());
+    }
+
+    #[test]
+    fn test_rsa_invalid_sizes() {
+        assert!(generate_rsa_key_pair(1024, false).is_err());
+        assert!(generate_rsa_key_pair(512, false).is_err());
+        assert!(generate_rsa_key_pair(8192, false).is_err());
+    }
+
+    #[test]
+    fn test_fips_rejects_rsa_2048() {
+        let result = generate_rsa_key_pair(2048, true);
+        assert!(result.is_err());
+        // RSA-3072 should work in FIPS mode (but skip to save time)
+    }
+
+    #[test]
+    fn test_ec_p256_key_format() {
+        let (private_key, public_key) = generate_ec_p256_key_pair().unwrap();
+        // P-256 private key is 32 bytes
+        assert_eq!(private_key.len(), 32);
+        // P-256 uncompressed public key is 65 bytes (04 || x || y)
+        assert_eq!(public_key.len(), 65);
+        assert_eq!(public_key[0], 0x04);
+    }
+
+    #[test]
+    fn test_ec_p384_key_format() {
+        let (private_key, public_key) = generate_ec_p384_key_pair().unwrap();
+        // P-384 private key is 48 bytes
+        assert_eq!(private_key.len(), 48);
+        // P-384 uncompressed public key is 97 bytes (04 || x || y)
+        assert_eq!(public_key.len(), 97);
+        assert_eq!(public_key[0], 0x04);
+    }
+
+    #[test]
+    fn test_ed25519_key_format() {
+        let (private_key, public_key) = generate_ed25519_key_pair().unwrap();
+        // Ed25519 private key is 32 bytes
+        assert_eq!(private_key.len(), 32);
+        // Ed25519 public key is 32 bytes
+        assert_eq!(public_key.len(), 32);
+    }
+
+    #[test]
+    fn test_keys_are_random() {
+        // Two AES-256 keys must differ
+        let key1 = generate_aes_key(32, false).unwrap();
+        let key2 = generate_aes_key(32, false).unwrap();
+        assert_ne!(key1.as_bytes(), key2.as_bytes());
+    }
+}

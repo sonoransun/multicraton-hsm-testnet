@@ -115,6 +115,14 @@ pub enum HsmError {
     ConfigError(String),
     #[error("audit chain integrity broken: {0}")]
     AuditChainBroken(String),
+    #[error("cryptographic error: {0}")]
+    CryptographicError(String),
+    #[error("unsupported operation: {0}")]
+    UnsupportedOperation(String),
+    #[error("initialization error: {0}")]
+    InitializationError(String),
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl From<HsmError> for CK_RV {
@@ -175,7 +183,19 @@ impl From<HsmError> for CK_RV {
             HsmError::RandomSeedNotSupported => CKR_RANDOM_SEED_NOT_SUPPORTED,
             HsmError::ConfigError(_) => CKR_GENERAL_ERROR,
             HsmError::AuditChainBroken(_) => CKR_GENERAL_ERROR,
+            HsmError::CryptographicError(_) => CKR_FUNCTION_FAILED,
+            HsmError::UnsupportedOperation(_) => CKR_FUNCTION_NOT_SUPPORTED,
+            HsmError::InitializationError(_) => CKR_DEVICE_ERROR,
+            HsmError::InvalidInput(_) => CKR_ARGUMENTS_BAD,
         }
+    }
+}
+
+/// Convert prometheus errors to general HSM errors
+#[cfg(feature = "observability")]
+impl From<prometheus::Error> for HsmError {
+    fn from(_: prometheus::Error) -> Self {
+        HsmError::GeneralError
     }
 }
 

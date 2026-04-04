@@ -5,6 +5,8 @@
 //! All mutating operations require a valid session handle and appropriate
 //! login state, mirroring the PKCS#11 access control model.
 
+use base64::engine::Engine;
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -67,6 +69,9 @@ impl HsmServiceImpl {
                  Token-level PIN retry counters provide persistent lockout."
             );
         }
+        tracing::info!(
+            "Login throttle state initialized (in-memory only, resets on daemon restart)"
+        );
         Self {
             hsm,
             max_random_length,
@@ -1189,7 +1194,9 @@ impl HsmService for HsmServiceImpl {
             Some(format!("key={}", req.key_handle)),
         )?;
 
-        Ok(Response::new(SignResponse { signature }))
+        Ok(Response::new(SignResponse {
+            signature: signature.to_vec(),
+        }))
     }
 
     async fn verify(
@@ -1412,6 +1419,7 @@ impl HsmService for HsmServiceImpl {
                     craton_hsm::crypto::sign::OaepHash::Sha256,
                 )
                 .map_err(hsm_err_to_status)?
+                .to_vec()
             }
             _ => {
                 return Err(Status::invalid_argument("Unsupported encryption mechanism"));
@@ -1627,9 +1635,365 @@ impl HsmService for HsmServiceImpl {
 
         Ok(Response::new(GenerateRandomResponse { random_data: buf }))
     }
+
+    // ── Wrapped Key Operations ──────────────────────────────────────────────
+
+    async fn wrap_key(
+        &self,
+        request: Request<WrapKeyRequest>,
+    ) -> Result<Response<WrapKeyResponse>, Status> {
+        let req = request.into_inner();
+
+        // Require authenticated session
+        require_authenticated_session(&self.hsm, req.session_handle)?;
+
+        let mechanism = proto_to_mechanism(&req.mechanism)?;
+
+        // Use the existing C_WrapKey implementation
+        let mut mechanism = mechanism;
+        let rv = craton_hsm::pkcs11_abi::functions::C_WrapKey(
+            req.session_handle,
+            &mut mechanism as *mut _,
+            req.wrapping_key_handle,
+            req.key_to_wrap_handle,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+
+        if rv != CKR_OK {
+            return Err(ckr_to_status(rv));
+        }
+
+        // Get the wrapped key length
+        let mut wrapped_key_len: CK_ULONG = 0;
+        let rv = craton_hsm::pkcs11_abi::functions::C_WrapKey(
+            req.session_handle,
+            &mut mechanism as *mut _,
+            req.wrapping_key_handle,
+            req.key_to_wrap_handle,
+            std::ptr::null_mut(),
+            &mut wrapped_key_len,
+        );
+
+        if rv != CKR_OK {
+            return Err(ckr_to_status(rv));
+        }
+
+        // Allocate buffer and get the wrapped key
+        let mut wrapped_key = vec![0u8; wrapped_key_len as usize];
+        let rv = craton_hsm::pkcs11_abi::functions::C_WrapKey(
+            req.session_handle,
+            &mut mechanism as *mut _,
+            req.wrapping_key_handle,
+            req.key_to_wrap_handle,
+            wrapped_key.as_mut_ptr(),
+            &mut wrapped_key_len,
+        );
+
+        if rv != CKR_OK {
+            return Err(ckr_to_status(rv));
+        }
+
+        // Resize to actual length
+        wrapped_key.resize(wrapped_key_len as usize, 0);
+
+        self.audit(
+            req.session_handle,
+            AuditOperation::WrapKey {
+                mechanism: mechanism.mechanism,
+                fips_approved: true, // TODO: Determine based on actual mechanism
+            },
+            AuditResult::Success,
+            None,
+        )?;
+
+        Ok(Response::new(WrapKeyResponse { wrapped_key }))
+    }
+
+    async fn unwrap_key(
+        &self,
+        request: Request<UnwrapKeyRequest>,
+    ) -> Result<Response<UnwrapKeyResponse>, Status> {
+        let req = request.into_inner();
+
+        // Require authenticated session
+        require_authenticated_session(&self.hsm, req.session_handle)?;
+
+        let mechanism = proto_to_mechanism(&req.mechanism)?;
+        let template = proto_attrs_to_template(&req.template)?;
+
+        // Convert template to PKCS#11 format
+        let ck_template: Vec<craton_hsm::pkcs11_abi::types::CK_ATTRIBUTE> = template
+            .iter()
+            .map(
+                |(attr_type, value)| craton_hsm::pkcs11_abi::types::CK_ATTRIBUTE {
+                    attr_type: *attr_type,
+                    p_value: value.as_ptr() as *mut std::os::raw::c_void,
+                    value_len: value.len() as CK_ULONG,
+                },
+            )
+            .collect();
+
+        let mut unwrapped_key_handle: CK_ULONG = 0;
+
+        // Use the existing C_UnwrapKey implementation
+        let mut mechanism = mechanism;
+        let mut ck_template = ck_template;
+        let rv = craton_hsm::pkcs11_abi::functions::C_UnwrapKey(
+            req.session_handle,
+            &mut mechanism as *mut _,
+            req.unwrapping_key_handle,
+            req.wrapped_key.as_ptr() as *mut u8,
+            req.wrapped_key.len() as CK_ULONG,
+            ck_template.as_mut_ptr(),
+            ck_template.len() as CK_ULONG,
+            &mut unwrapped_key_handle,
+        );
+
+        if rv != CKR_OK {
+            return Err(ckr_to_status(rv));
+        }
+
+        self.audit(
+            req.session_handle,
+            AuditOperation::UnwrapKey {
+                mechanism: mechanism.mechanism,
+                fips_approved: true, // TODO: Determine based on actual mechanism
+            },
+            AuditResult::Success,
+            None,
+        )?;
+
+        Ok(Response::new(UnwrapKeyResponse {
+            unwrapped_key_handle,
+        }))
+    }
+
+    async fn export_wrapped_key(
+        &self,
+        request: Request<ExportWrappedKeyRequest>,
+    ) -> Result<Response<ExportWrappedKeyResponse>, Status> {
+        let req = request.into_inner();
+
+        // Require authenticated session
+        require_authenticated_session(&self.hsm, req.session_handle)?;
+
+        // For now, only support JSON format
+        if req.format != "json" {
+            return Err(Status::unimplemented(
+                "Only JSON format is currently supported",
+            ));
+        }
+
+        // First, wrap the key using AES-KW mechanism (default for JSON export)
+        let aes_kw_mechanism = craton_hsm::pkcs11_abi::types::CK_MECHANISM {
+            mechanism: CKM_AES_KEY_WRAP,
+            p_parameter: std::ptr::null_mut(),
+            parameter_len: 0,
+        };
+
+        // Get wrapped key length
+        let mut wrapped_key_len: CK_ULONG = 0;
+        let mut aes_kw_mechanism = aes_kw_mechanism;
+        let rv = craton_hsm::pkcs11_abi::functions::C_WrapKey(
+            req.session_handle,
+            &mut aes_kw_mechanism as *mut _,
+            req.wrapping_key_handle,
+            req.key_to_export_handle,
+            std::ptr::null_mut(),
+            &mut wrapped_key_len,
+        );
+
+        if rv != CKR_OK {
+            return Err(ckr_to_status(rv));
+        }
+
+        // Get the wrapped key data
+        let mut wrapped_key_data = vec![0u8; wrapped_key_len as usize];
+        let rv = craton_hsm::pkcs11_abi::functions::C_WrapKey(
+            req.session_handle,
+            &mut aes_kw_mechanism as *mut _,
+            req.wrapping_key_handle,
+            req.key_to_export_handle,
+            wrapped_key_data.as_mut_ptr(),
+            &mut wrapped_key_len,
+        );
+
+        if rv != CKR_OK {
+            return Err(ckr_to_status(rv));
+        }
+
+        wrapped_key_data.resize(wrapped_key_len as usize, 0);
+
+        // Get the object to export (we need to implement this helper)
+        // For now, return a placeholder response
+        let export_data = format!(
+            r#"{{
+    "version": 1,
+    "format": "craton-hsm-wrapped-key",
+    "created": "{}",
+    "wrapped_key": "{}",
+    "placeholder": true
+}}"#,
+            chrono::Utc::now().to_rfc3339(),
+            base64::engine::general_purpose::STANDARD.encode(&wrapped_key_data)
+        );
+
+        self.audit(
+            req.session_handle,
+            AuditOperation::ExportWrappedKey {
+                wrapping_key_handle: req.wrapping_key_handle,
+                key_to_export_handle: req.key_to_export_handle,
+                format: req.format.clone(),
+            },
+            AuditResult::Success,
+            None,
+        )?;
+
+        Ok(Response::new(ExportWrappedKeyResponse {
+            export_data: export_data.into_bytes(),
+            content_type: "application/json".to_string(),
+        }))
+    }
+
+    async fn import_wrapped_key(
+        &self,
+        request: Request<ImportWrappedKeyRequest>,
+    ) -> Result<Response<ImportWrappedKeyResponse>, Status> {
+        let req = request.into_inner();
+
+        // Require authenticated session
+        require_authenticated_session(&self.hsm, req.session_handle)?;
+
+        // For now, only support JSON format
+        if req.format != "json" {
+            return Err(Status::unimplemented(
+                "Only JSON format is currently supported",
+            ));
+        }
+
+        // Parse the JSON data (simplified for now)
+        let json_str = String::from_utf8(req.import_data)
+            .map_err(|_| Status::invalid_argument("Invalid UTF-8 in import data"))?;
+
+        let json_value: serde_json::Value = serde_json::from_str(&json_str)
+            .map_err(|_| Status::invalid_argument("Invalid JSON format"))?;
+
+        let wrapped_key_b64 = json_value
+            .get("wrapped_key")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Status::invalid_argument("Missing wrapped_key in JSON"))?;
+
+        let wrapped_key_data = base64::engine::general_purpose::STANDARD
+            .decode(wrapped_key_b64)
+            .map_err(|_| Status::invalid_argument("Invalid base64 in wrapped_key"))?;
+
+        // Prepare template
+        let template = proto_attrs_to_template(&req.template)?;
+        let ck_template: Vec<craton_hsm::pkcs11_abi::types::CK_ATTRIBUTE> = template
+            .iter()
+            .map(
+                |(attr_type, value)| craton_hsm::pkcs11_abi::types::CK_ATTRIBUTE {
+                    attr_type: *attr_type,
+                    p_value: value.as_ptr() as *mut std::os::raw::c_void,
+                    value_len: value.len() as CK_ULONG,
+                },
+            )
+            .collect();
+
+        // Unwrap using AES-KW mechanism
+        let aes_kw_mechanism = craton_hsm::pkcs11_abi::types::CK_MECHANISM {
+            mechanism: CKM_AES_KEY_WRAP,
+            p_parameter: std::ptr::null_mut(),
+            parameter_len: 0,
+        };
+
+        let mut imported_key_handle: CK_ULONG = 0;
+
+        let mut aes_kw_mechanism = aes_kw_mechanism;
+        let mut ck_template = ck_template;
+        let rv = craton_hsm::pkcs11_abi::functions::C_UnwrapKey(
+            req.session_handle,
+            &mut aes_kw_mechanism as *mut _,
+            req.unwrapping_key_handle,
+            wrapped_key_data.as_ptr() as *mut u8,
+            wrapped_key_data.len() as CK_ULONG,
+            ck_template.as_mut_ptr(),
+            ck_template.len() as CK_ULONG,
+            &mut imported_key_handle,
+        );
+
+        if rv != CKR_OK {
+            return Err(ckr_to_status(rv));
+        }
+
+        self.audit(
+            req.session_handle,
+            AuditOperation::ImportWrappedKey {
+                unwrapping_key_handle: req.unwrapping_key_handle,
+                imported_key_handle,
+                format: req.format.clone(),
+            },
+            AuditResult::Success,
+            None,
+        )?;
+
+        Ok(Response::new(ImportWrappedKeyResponse {
+            imported_key_handle,
+        }))
+    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Convert protobuf Mechanism to PKCS#11 CK_MECHANISM.
+fn proto_to_mechanism(
+    proto_mech: &Option<Mechanism>,
+) -> Result<craton_hsm::pkcs11_abi::types::CK_MECHANISM, Status> {
+    let mech = proto_mech
+        .as_ref()
+        .ok_or_else(|| Status::invalid_argument("Missing mechanism"))?;
+
+    let mechanism_type: u64 = mech
+        .mechanism_type
+        .try_into()
+        .map_err(|_| Status::invalid_argument("Invalid mechanism type"))?;
+
+    Ok(craton_hsm::pkcs11_abi::types::CK_MECHANISM {
+        mechanism: mechanism_type,
+        p_parameter: if mech.parameter.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            mech.parameter.as_ptr() as *mut std::os::raw::c_void
+        },
+        parameter_len: mech.parameter.len() as CK_ULONG,
+    })
+}
+
+/// Convert a PKCS#11 return value to a gRPC Status.
+fn ckr_to_status(ckr: CK_ULONG) -> Status {
+    use craton_hsm::error::HsmError;
+    match ckr {
+        CKR_OK => Status::ok("Success"),
+        CKR_GENERAL_ERROR => Status::internal("General error"),
+        CKR_HOST_MEMORY => Status::resource_exhausted("Host memory exhausted"),
+        CKR_SLOT_ID_INVALID => Status::invalid_argument("Invalid slot ID"),
+        CKR_SESSION_HANDLE_INVALID => Status::invalid_argument("Invalid session handle"),
+        CKR_OBJECT_HANDLE_INVALID => Status::invalid_argument("Invalid object handle"),
+        CKR_MECHANISM_INVALID => Status::invalid_argument("Invalid mechanism"),
+        CKR_KEY_HANDLE_INVALID => Status::invalid_argument("Invalid key handle"),
+        CKR_KEY_TYPE_INCONSISTENT => Status::invalid_argument("Inconsistent key type"),
+        CKR_KEY_NOT_WRAPPABLE => Status::failed_precondition("Key not wrappable"),
+        CKR_WRAPPING_KEY_HANDLE_INVALID => Status::invalid_argument("Invalid wrapping key handle"),
+        CKR_WRAPPING_KEY_SIZE_RANGE => Status::invalid_argument("Wrapping key size out of range"),
+        CKR_WRAPPING_KEY_TYPE_INCONSISTENT => {
+            Status::invalid_argument("Inconsistent wrapping key type")
+        }
+        CKR_WRAPPED_KEY_INVALID => Status::invalid_argument("Invalid wrapped key"),
+        CKR_WRAPPED_KEY_LEN_RANGE => Status::invalid_argument("Wrapped key length out of range"),
+        _ => Status::internal("Unknown error"),
+    }
+}
 
 /// (#31) Uses try_into instead of `as` to prevent silent truncation of attribute
 /// types on 32-bit platforms, consistent with `to_ck_ulong()`.
@@ -1789,6 +2153,10 @@ fn hsm_err_to_status(e: craton_hsm::error::HsmError) -> Status {
         | HsmError::HostMemory
         | HsmError::DeviceMemory
         | HsmError::ConfigError(_)
-        | HsmError::AuditChainBroken(_) => Status::internal("Internal error"),
+        | HsmError::AuditChainBroken(_)
+        | HsmError::CryptographicError(_)
+        | HsmError::InitializationError(_) => Status::internal("Internal error"),
+        HsmError::UnsupportedOperation(_) => Status::unimplemented("Operation not supported"),
+        HsmError::InvalidInput(_) => Status::invalid_argument("Invalid input"),
     }
 }

@@ -5,6 +5,30 @@
 use serde::Deserialize;
 use std::net::SocketAddr;
 
+/// Metrics server configuration
+#[derive(Debug, Deserialize)]
+pub struct MetricsConfig {
+    /// Whether to enable the metrics server. Default: false.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Address to bind the metrics server. Default: 127.0.0.1:9090.
+    #[serde(default = "default_metrics_bind")]
+    pub bind_address: String,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind_address: default_metrics_bind(),
+        }
+    }
+}
+
+fn default_metrics_bind() -> String {
+    "127.0.0.1:9090".to_string()
+}
+
 /// Configuration for the daemon, loaded from [daemon] section of craton_hsm.toml.
 #[derive(Debug, Deserialize)]
 pub struct DaemonConfig {
@@ -52,6 +76,9 @@ pub struct DaemonConfig {
     /// Per-request timeout in seconds. Default: 30.
     #[serde(default = "default_request_timeout_secs")]
     pub request_timeout_secs: u64,
+    /// Metrics server configuration.
+    #[serde(default)]
+    pub metrics: MetricsConfig,
 }
 
 fn default_bind() -> String {
@@ -97,6 +124,7 @@ impl Default for DaemonConfig {
             login_cooldown_secs: default_login_cooldown_secs(),
             max_connections: default_max_connections(),
             request_timeout_secs: default_request_timeout_secs(),
+            metrics: MetricsConfig::default(),
         }
     }
 }

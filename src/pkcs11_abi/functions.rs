@@ -301,6 +301,7 @@ pub extern "C" fn C_Finalize(p_reserved: CK_VOID_PTR) -> CK_RV {
         // Invalidate all thread-local HSM caches.
         HSM_GENERATION.fetch_add(1, Ordering::Release);
         CACHED_HSM.with(|c| *c.borrow_mut() = None);
+        crate::session::tls_cache::clear_session_cache();
         CKR_OK
     })
     .unwrap_or(CKR_GENERAL_ERROR)
@@ -795,13 +796,23 @@ pub extern "C" fn C_OpenSession(
             Ok(h) => h,
             Err(rv) => return rv,
         };
+
+        #[cfg(feature = "observability")]
+        let _timer = hsm.metrics().operation_timer();
+
         if ph_session.is_null() {
+            #[cfg(feature = "observability")]
+            hsm.metrics().record_operation_error();
             return CKR_ARGUMENTS_BAD;
         }
 
         let token = match hsm.slot_manager.get_token(slot_id) {
             Ok(t) => t,
-            Err(e) => return err_to_rv(e),
+            Err(e) => {
+                #[cfg(feature = "observability")]
+                hsm.metrics().record_operation_error();
+                return err_to_rv(e);
+            }
         };
 
         match hsm.session_manager.open_session(slot_id, flags, &token) {
@@ -809,9 +820,19 @@ pub extern "C" fn C_OpenSession(
                 unsafe {
                     *ph_session = handle;
                 }
+                #[cfg(feature = "observability")]
+                hsm.metrics().record_operation_success();
+                #[cfg(feature = "observability")]
+                hsm.metrics().sessions_created_total.inc();
+                #[cfg(feature = "observability")]
+                hsm.metrics().active_sessions.inc();
                 CKR_OK
             }
-            Err(e) => err_to_rv(e),
+            Err(e) => {
+                #[cfg(feature = "observability")]
+                hsm.metrics().record_operation_error();
+                err_to_rv(e)
+            }
         }
     })
     .unwrap_or(CKR_GENERAL_ERROR)
@@ -825,20 +846,41 @@ pub extern "C" fn C_CloseSession(session: CK_SESSION_HANDLE) -> CK_RV {
             Err(rv) => return rv,
         };
 
+        #[cfg(feature = "observability")]
+        let _timer = hsm.metrics().operation_timer();
+
         // Need to get the slot_id from the session first
         let sess = match hsm.session_manager.get_session(session) {
             Ok(s) => s,
-            Err(e) => return err_to_rv(e),
+            Err(e) => {
+                #[cfg(feature = "observability")]
+                hsm.metrics().record_operation_error();
+                return err_to_rv(e);
+            }
         };
         let slot_id = sess.read().slot_id;
         let token = match hsm.slot_manager.get_token(slot_id) {
             Ok(t) => t,
-            Err(e) => return err_to_rv(e),
+            Err(e) => {
+                #[cfg(feature = "observability")]
+                hsm.metrics().record_operation_error();
+                return err_to_rv(e);
+            }
         };
 
         match hsm.session_manager.close_session(session, &token) {
-            Ok(()) => CKR_OK,
-            Err(e) => err_to_rv(e),
+            Ok(()) => {
+                #[cfg(feature = "observability")]
+                hsm.metrics().record_operation_success();
+                #[cfg(feature = "observability")]
+                hsm.metrics().active_sessions.dec();
+                CKR_OK
+            }
+            Err(e) => {
+                #[cfg(feature = "observability")]
+                hsm.metrics().record_operation_error();
+                err_to_rv(e)
+            }
         }
     })
     .unwrap_or(CKR_GENERAL_ERROR)
@@ -851,12 +893,23 @@ pub extern "C" fn C_CloseAllSessions(slot_id: CK_SLOT_ID) -> CK_RV {
             Ok(h) => h,
             Err(rv) => return rv,
         };
+
+        #[cfg(feature = "observability")]
+        let _timer = hsm.metrics().operation_timer();
+
         let token = match hsm.slot_manager.get_token(slot_id) {
             Ok(t) => t,
-            Err(e) => return err_to_rv(e),
+            Err(e) => {
+                #[cfg(feature = "observability")]
+                hsm.metrics().record_operation_error();
+                return err_to_rv(e);
+            }
         };
 
+        // Note: We can't track exact session count closed without modifying session manager interface
         hsm.session_manager.close_all_sessions(slot_id, &token);
+        #[cfg(feature = "observability")]
+        hsm.metrics().record_operation_success();
         CKR_OK
     })
     .unwrap_or(CKR_GENERAL_ERROR)
@@ -1534,7 +1587,13 @@ pub extern "C" fn C_Encrypt(
             Ok(h) => h,
             Err(rv) => return rv,
         };
+
+        #[cfg(feature = "observability")]
+        let _timer = hsm.metrics().operation_timer();
+
         if p_data.is_null() || pul_encrypted_data_len.is_null() {
+            #[cfg(feature = "observability")]
+            hsm.metrics().record_operation_error();
             return CKR_ARGUMENTS_BAD;
         }
 
@@ -1688,6 +1747,10 @@ pub extern "C" fn C_Encrypt(
                 );
 
                 sess.active_operation = None;
+                #[cfg(feature = "observability")]
+                hsm.metrics().record_operation_success();
+                #[cfg(feature = "observability")]
+                hsm.metrics().encryptions_total.inc();
                 CKR_OK
             }
             Err(e) => {
@@ -1702,6 +1765,8 @@ pub extern "C" fn C_Encrypt(
                     None,
                 );
                 sess.active_operation = None;
+                #[cfg(feature = "observability")]
+                hsm.metrics().record_operation_error();
                 rv
             }
         }
@@ -1790,7 +1855,13 @@ pub extern "C" fn C_Decrypt(
             Ok(h) => h,
             Err(rv) => return rv,
         };
+
+        #[cfg(feature = "observability")]
+        let _timer = hsm.metrics().operation_timer();
+
         if p_encrypted_data.is_null() || pul_data_len.is_null() {
+            #[cfg(feature = "observability")]
+            hsm.metrics().record_operation_error();
             return CKR_ARGUMENTS_BAD;
         }
 
@@ -1919,6 +1990,10 @@ pub extern "C" fn C_Decrypt(
                 );
 
                 sess.active_operation = None;
+                #[cfg(feature = "observability")]
+                hsm.metrics().record_operation_success();
+                #[cfg(feature = "observability")]
+                hsm.metrics().decryptions_total.inc();
                 CKR_OK
             }
             Err(e) => {
@@ -1933,6 +2008,8 @@ pub extern "C" fn C_Decrypt(
                     None,
                 );
                 sess.active_operation = None;
+                #[cfg(feature = "observability")]
+                hsm.metrics().record_operation_error();
                 rv
             }
         }
@@ -2034,13 +2111,24 @@ pub extern "C" fn C_Sign(
             Ok(h) => h,
             Err(rv) => return rv,
         };
+
+        // Start metrics timer for operation duration
+        #[cfg(feature = "observability")]
+        let _timer = hsm.metrics().operation_timer();
+
         if p_data.is_null() || pul_signature_len.is_null() {
+            #[cfg(feature = "observability")]
+            hsm.metrics().record_operation_error();
             return CKR_ARGUMENTS_BAD;
         }
 
         let sess = match hsm.session_manager.get_session(session) {
             Ok(s) => s,
-            Err(e) => return err_to_rv(e),
+            Err(e) => {
+                #[cfg(feature = "observability")]
+                hsm.metrics().record_operation_error();
+                return err_to_rv(e);
+            }
         };
         let mut sess = sess.write();
 
@@ -2121,6 +2209,10 @@ pub extern "C" fn C_Sign(
                 );
 
                 sess.active_operation = None;
+                #[cfg(feature = "observability")]
+                hsm.metrics().record_operation_success();
+                #[cfg(feature = "observability")]
+                hsm.metrics().signatures_total.inc();
                 CKR_OK
             }
             Err(e) => {
@@ -2135,6 +2227,8 @@ pub extern "C" fn C_Sign(
                     None,
                 );
                 sess.active_operation = None;
+                #[cfg(feature = "observability")]
+                hsm.metrics().record_operation_error();
                 rv
             }
         }
@@ -2176,10 +2270,12 @@ fn sign_single_shot(
     } else if sign::is_eddsa_mechanism(mechanism) {
         backend.ed25519_sign(key_bytes, data)
     } else if pqc::is_ml_dsa_mechanism(mechanism) {
-        let variant = pqc::mechanism_to_ml_dsa_variant(mechanism).unwrap();
+        let variant =
+            pqc::mechanism_to_ml_dsa_variant(mechanism).ok_or(HsmError::MechanismInvalid)?;
         pqc::ml_dsa_sign(key_bytes, data, variant)
     } else if pqc::is_slh_dsa_mechanism(mechanism) {
-        let variant = pqc::mechanism_to_slh_dsa_variant(mechanism).unwrap();
+        let variant =
+            pqc::mechanism_to_slh_dsa_variant(mechanism).ok_or(HsmError::MechanismInvalid)?;
         pqc::slh_dsa_sign(key_bytes, data, variant)
     } else if pqc::is_hybrid_mechanism(mechanism) {
         let ecdsa_key = obj
@@ -2264,14 +2360,16 @@ fn verify_single_shot(
             .public_key_data
             .as_deref()
             .ok_or(HsmError::KeyHandleInvalid)?;
-        let variant = pqc::mechanism_to_ml_dsa_variant(mechanism).unwrap();
+        let variant =
+            pqc::mechanism_to_ml_dsa_variant(mechanism).ok_or(HsmError::MechanismInvalid)?;
         pqc::ml_dsa_verify(pub_key, data, signature, variant)
     } else if pqc::is_slh_dsa_mechanism(mechanism) {
         let pub_key = obj
             .public_key_data
             .as_deref()
             .ok_or(HsmError::KeyHandleInvalid)?;
-        let variant = pqc::mechanism_to_slh_dsa_variant(mechanism).unwrap();
+        let variant =
+            pqc::mechanism_to_slh_dsa_variant(mechanism).ok_or(HsmError::MechanismInvalid)?;
         pqc::slh_dsa_verify(pub_key, data, signature, variant)
     } else if pqc::is_hybrid_mechanism(mechanism) {
         let ml_dsa_vk = obj
@@ -2700,7 +2798,13 @@ pub extern "C" fn C_GenerateKeyPair(
             Ok(h) => h,
             Err(rv) => return rv,
         };
+
+        #[cfg(feature = "observability")]
+        let _timer = hsm.metrics().operation_timer();
+
         if p_mechanism.is_null() || ph_public_key.is_null() || ph_private_key.is_null() {
+            #[cfg(feature = "observability")]
+            hsm.metrics().record_operation_error();
             return CKR_ARGUMENTS_BAD;
         }
 
@@ -2767,6 +2871,11 @@ pub extern "C" fn C_GenerateKeyPair(
             AuditResult::Success,
             None,
         );
+
+        #[cfg(feature = "observability")]
+        hsm.metrics().record_operation_success();
+        #[cfg(feature = "observability")]
+        hsm.metrics().keys_generated_total.inc();
 
         unsafe {
             *ph_public_key = pub_handle;
@@ -3023,24 +3132,27 @@ fn generate_pqc_keypair(
 
     // FIPS 140-3 §9.6: Pairwise consistency test for PQC key pairs
     let pairwise_result = if key_type == CKK_ML_KEM {
-        let variant_name = match pqc::mechanism_to_ml_kem_variant(mechanism).unwrap() {
-            pqc::MlKemVariant::MlKem512 => "ML-KEM-512",
-            pqc::MlKemVariant::MlKem768 => "ML-KEM-768",
-            pqc::MlKemVariant::MlKem1024 => "ML-KEM-1024",
-        };
+        let variant_name =
+            match pqc::mechanism_to_ml_kem_variant(mechanism).ok_or(CKR_MECHANISM_INVALID)? {
+                pqc::MlKemVariant::MlKem512 => "ML-KEM-512",
+                pqc::MlKemVariant::MlKem768 => "ML-KEM-768",
+                pqc::MlKemVariant::MlKem1024 => "ML-KEM-1024",
+            };
         pairwise_test::ml_kem_pairwise_test(&private_key, &public_key, variant_name)
     } else if key_type == CKK_ML_DSA {
-        let variant_name = match pqc::mechanism_to_ml_dsa_variant(mechanism).unwrap() {
-            pqc::MlDsaVariant::MlDsa44 => "ML-DSA-44",
-            pqc::MlDsaVariant::MlDsa65 => "ML-DSA-65",
-            pqc::MlDsaVariant::MlDsa87 => "ML-DSA-87",
-        };
+        let variant_name =
+            match pqc::mechanism_to_ml_dsa_variant(mechanism).ok_or(CKR_MECHANISM_INVALID)? {
+                pqc::MlDsaVariant::MlDsa44 => "ML-DSA-44",
+                pqc::MlDsaVariant::MlDsa65 => "ML-DSA-65",
+                pqc::MlDsaVariant::MlDsa87 => "ML-DSA-87",
+            };
         pairwise_test::ml_dsa_pairwise_test(&private_key, &public_key, variant_name)
     } else if key_type == CKK_SLH_DSA {
-        let variant_name = match pqc::mechanism_to_slh_dsa_variant(mechanism).unwrap() {
-            pqc::SlhDsaVariant::Sha2_128s => "SLH-DSA-SHA2-128s",
-            pqc::SlhDsaVariant::Sha2_256s => "SLH-DSA-SHA2-256s",
-        };
+        let variant_name =
+            match pqc::mechanism_to_slh_dsa_variant(mechanism).ok_or(CKR_MECHANISM_INVALID)? {
+                pqc::SlhDsaVariant::Sha2_128s => "SLH-DSA-SHA2-128s",
+                pqc::SlhDsaVariant::Sha2_256s => "SLH-DSA-SHA2-256s",
+            };
         pairwise_test::slh_dsa_pairwise_test(&private_key, &public_key, variant_name)
     } else {
         Ok(())
@@ -3985,6 +4097,10 @@ pub extern "C" fn C_EncryptFinal(
                 );
 
                 sess.active_operation = None;
+                #[cfg(feature = "observability")]
+                hsm.metrics().record_operation_success();
+                #[cfg(feature = "observability")]
+                hsm.metrics().signatures_total.inc();
                 CKR_OK
             }
             Err(e) => {
@@ -4197,6 +4313,10 @@ pub extern "C" fn C_DecryptFinal(
                 );
 
                 sess.active_operation = None;
+                #[cfg(feature = "observability")]
+                hsm.metrics().record_operation_success();
+                #[cfg(feature = "observability")]
+                hsm.metrics().signatures_total.inc();
                 CKR_OK
             }
             Err(e) => {
@@ -4325,6 +4445,10 @@ pub extern "C" fn C_Digest(
                 }
 
                 sess.active_operation = None;
+                #[cfg(feature = "observability")]
+                hsm.metrics().record_operation_success();
+                #[cfg(feature = "observability")]
+                hsm.metrics().signatures_total.inc();
                 CKR_OK
             }
             Err(e) => {
@@ -4721,6 +4845,10 @@ pub extern "C" fn C_SignFinal(
                 );
 
                 sess.active_operation = None;
+                #[cfg(feature = "observability")]
+                hsm.metrics().record_operation_success();
+                #[cfg(feature = "observability")]
+                hsm.metrics().signatures_total.inc();
                 CKR_OK
             }
             Err(e) => {

@@ -18,6 +18,7 @@ use crate::pkcs11_abi::types::CK_MECHANISM_TYPE;
 // parsed key keyed by a SHA-256 hash of the DER bytes. The cache is bounded
 // to prevent unbounded memory growth.
 
+use arrayvec::ArrayVec;
 use std::sync::LazyLock;
 use zeroize::Zeroize;
 
@@ -191,6 +192,16 @@ pub enum HashAlg {
     Sha512,
 }
 
+// Maximum signature size (512 bytes = 4096-bit RSA key)
+// This covers all reasonable RSA key sizes and most ECDSA/EdDSA signatures
+pub const MAX_SIGNATURE_SIZE: usize = 512;
+
+/// Stack-allocated signature buffer to reduce heap allocations
+pub type SignatureBuffer = ArrayVec<u8, MAX_SIGNATURE_SIZE>;
+
+/// Stack-allocated ciphertext buffer for small ciphertext (same size as signatures)
+pub type CiphertextBuffer = ArrayVec<u8, MAX_SIGNATURE_SIZE>;
+
 // ============================================================================
 // RSA PKCS#1 v1.5
 // ============================================================================
@@ -200,7 +211,7 @@ pub fn rsa_pkcs1v15_sign(
     private_key_der: &[u8],
     data: &[u8],
     hash_alg: Option<HashAlg>,
-) -> HsmResult<Vec<u8>> {
+) -> HsmResult<SignatureBuffer> {
     use rsa::signature::SignatureEncoding;
 
     validate_data_size(data)?;
@@ -213,21 +224,24 @@ pub fn rsa_pkcs1v15_sign(
             use rsa::signature::Signer;
             let signing_key = SigningKey::<Sha256>::new(private_key);
             let signature = signing_key.sign(data);
-            Ok(signature.to_vec())
+            SignatureBuffer::try_from(&signature.to_bytes()[..])
+                .map_err(|_| HsmError::SignatureLenRange)
         }
         Some(HashAlg::Sha384) => {
             use rsa::pkcs1v15::SigningKey;
             use rsa::signature::Signer;
             let signing_key = SigningKey::<Sha384>::new(private_key);
             let signature = signing_key.sign(data);
-            Ok(signature.to_vec())
+            SignatureBuffer::try_from(&signature.to_bytes()[..])
+                .map_err(|_| HsmError::SignatureLenRange)
         }
         Some(HashAlg::Sha512) => {
             use rsa::pkcs1v15::SigningKey;
             use rsa::signature::Signer;
             let signing_key = SigningKey::<Sha512>::new(private_key);
             let signature = signing_key.sign(data);
-            Ok(signature.to_vec())
+            SignatureBuffer::try_from(&signature.to_bytes()[..])
+                .map_err(|_| HsmError::SignatureLenRange)
         }
         None => {
             // Reject unprefixed PKCS#1 v1.5 signing — vulnerable to Bleichenbacher forgery.
@@ -294,7 +308,11 @@ pub fn rsa_pkcs1v15_verify(
 /// Uses the SP 800-90A HMAC_DRBG for salt generation (via `DrbgRng`)
 /// instead of `OsRng` directly, ensuring all randomness benefits from
 /// the DRBG's continuous health testing and prediction resistance.
-pub fn rsa_pss_sign(private_key_der: &[u8], data: &[u8], hash_alg: HashAlg) -> HsmResult<Vec<u8>> {
+pub fn rsa_pss_sign(
+    private_key_der: &[u8],
+    data: &[u8],
+    hash_alg: HashAlg,
+) -> HsmResult<SignatureBuffer> {
     use crate::crypto::drbg::DrbgRng;
     use rsa::pss::SigningKey;
     use rsa::signature::{RandomizedSigner, SignatureEncoding};
@@ -309,17 +327,20 @@ pub fn rsa_pss_sign(private_key_der: &[u8], data: &[u8], hash_alg: HashAlg) -> H
         HashAlg::Sha256 => {
             let signing_key = SigningKey::<Sha256>::new(private_key);
             let signature = signing_key.sign_with_rng(&mut rng, data);
-            Ok(signature.to_vec())
+            SignatureBuffer::try_from(&signature.to_bytes()[..])
+                .map_err(|_| HsmError::SignatureLenRange)
         }
         HashAlg::Sha384 => {
             let signing_key = SigningKey::<Sha384>::new(private_key);
             let signature = signing_key.sign_with_rng(&mut rng, data);
-            Ok(signature.to_vec())
+            SignatureBuffer::try_from(&signature.to_bytes()[..])
+                .map_err(|_| HsmError::SignatureLenRange)
         }
         HashAlg::Sha512 => {
             let signing_key = SigningKey::<Sha512>::new(private_key);
             let signature = signing_key.sign_with_rng(&mut rng, data);
-            Ok(signature.to_vec())
+            SignatureBuffer::try_from(&signature.to_bytes()[..])
+                .map_err(|_| HsmError::SignatureLenRange)
         }
     }
 }
@@ -385,7 +406,7 @@ pub fn rsa_oaep_encrypt(
     public_exponent: &[u8],
     plaintext: &[u8],
     hash_alg: OaepHash,
-) -> HsmResult<Vec<u8>> {
+) -> HsmResult<CiphertextBuffer> {
     use crate::crypto::drbg::DrbgRng;
     use rsa::Oaep;
 
@@ -399,21 +420,24 @@ pub fn rsa_oaep_encrypt(
     match hash_alg {
         OaepHash::Sha256 => {
             let padding = Oaep::new::<Sha256>();
-            public_key
+            let ciphertext = public_key
                 .encrypt(&mut rng, padding, plaintext)
-                .map_err(|_| HsmError::GeneralError)
+                .map_err(|_| HsmError::GeneralError)?;
+            CiphertextBuffer::try_from(&ciphertext[..]).map_err(|_| HsmError::DataLenRange)
         }
         OaepHash::Sha384 => {
             let padding = Oaep::new::<Sha384>();
-            public_key
+            let ciphertext = public_key
                 .encrypt(&mut rng, padding, plaintext)
-                .map_err(|_| HsmError::GeneralError)
+                .map_err(|_| HsmError::GeneralError)?;
+            CiphertextBuffer::try_from(&ciphertext[..]).map_err(|_| HsmError::DataLenRange)
         }
         OaepHash::Sha512 => {
             let padding = Oaep::new::<Sha512>();
-            public_key
+            let ciphertext = public_key
                 .encrypt(&mut rng, padding, plaintext)
-                .map_err(|_| HsmError::GeneralError)
+                .map_err(|_| HsmError::GeneralError)?;
+            CiphertextBuffer::try_from(&ciphertext[..]).map_err(|_| HsmError::DataLenRange)
         }
     }
 }
@@ -462,7 +486,7 @@ pub fn rsa_oaep_decrypt(
 /// attacks (Rowhammer, voltage glitching) that can recover the private key
 /// from a single faulty deterministic signature, while still preventing
 /// catastrophic nonce reuse if the RNG fails.
-pub fn ecdsa_p256_sign(private_key_bytes: &[u8], data: &[u8]) -> HsmResult<Vec<u8>> {
+pub fn ecdsa_p256_sign(private_key_bytes: &[u8], data: &[u8]) -> HsmResult<SignatureBuffer> {
     use crate::crypto::drbg::DrbgRng;
     use p256::ecdsa::signature::RandomizedSigner;
     use p256::ecdsa::SigningKey;
@@ -472,7 +496,8 @@ pub fn ecdsa_p256_sign(private_key_bytes: &[u8], data: &[u8]) -> HsmResult<Vec<u
         SigningKey::from_slice(private_key_bytes).map_err(|_| HsmError::KeyHandleInvalid)?;
     let mut rng = DrbgRng::new()?;
     let signature: p256::ecdsa::Signature = signing_key.sign_with_rng(&mut rng, data);
-    Ok(signature.to_der().to_bytes().to_vec())
+    let signature_bytes = signature.to_der().to_bytes();
+    SignatureBuffer::try_from(&signature_bytes[..]).map_err(|_| HsmError::SignatureLenRange)
 }
 
 /// ECDSA P-256 verify
@@ -500,7 +525,7 @@ pub fn ecdsa_p256_verify(
 ///
 /// Uses randomized/hedged signing to protect against fault injection attacks.
 /// See `ecdsa_p256_sign` for rationale.
-pub fn ecdsa_p384_sign(private_key_bytes: &[u8], data: &[u8]) -> HsmResult<Vec<u8>> {
+pub fn ecdsa_p384_sign(private_key_bytes: &[u8], data: &[u8]) -> HsmResult<SignatureBuffer> {
     use crate::crypto::drbg::DrbgRng;
     use p384::ecdsa::signature::RandomizedSigner;
     use p384::ecdsa::SigningKey;
@@ -510,7 +535,8 @@ pub fn ecdsa_p384_sign(private_key_bytes: &[u8], data: &[u8]) -> HsmResult<Vec<u
         SigningKey::from_slice(private_key_bytes).map_err(|_| HsmError::KeyHandleInvalid)?;
     let mut rng = DrbgRng::new()?;
     let signature: p384::ecdsa::Signature = signing_key.sign_with_rng(&mut rng, data);
-    Ok(signature.to_der().to_bytes().to_vec())
+    let signature_bytes = signature.to_der().to_bytes();
+    SignatureBuffer::try_from(&signature_bytes[..]).map_err(|_| HsmError::SignatureLenRange)
 }
 
 /// ECDSA P-384 verify
@@ -545,7 +571,7 @@ pub fn ecdsa_p384_verify(
 /// RFC 8032 and breaking interoperability. If fault injection resistance is
 /// required, use ECDSA P-256/P-384 (which are hedged) or deploy hardware
 /// countermeasures (voltage monitoring, instruction duplication).
-pub fn ed25519_sign(private_key_bytes: &[u8], data: &[u8]) -> HsmResult<Vec<u8>> {
+pub fn ed25519_sign(private_key_bytes: &[u8], data: &[u8]) -> HsmResult<SignatureBuffer> {
     use ed25519_dalek::Signer;
     use ed25519_dalek::SigningKey;
 
@@ -561,7 +587,8 @@ pub fn ed25519_sign(private_key_bytes: &[u8], data: &[u8]) -> HsmResult<Vec<u8>>
     // `signing_key` goes out of scope at the end of this function.
     let signing_key = SigningKey::from_bytes(&key_array);
     let signature = signing_key.sign(data);
-    Ok(signature.to_bytes().to_vec())
+    SignatureBuffer::try_from(signature.to_bytes().as_slice())
+        .map_err(|_| HsmError::SignatureLenRange)
 }
 
 /// Ed25519 verify
@@ -689,7 +716,7 @@ pub(crate) fn rsa_pkcs1v15_sign_prehashed(
     private_key_der: &[u8],
     digest: &[u8],
     hash_alg: HashAlg,
-) -> HsmResult<Vec<u8>> {
+) -> HsmResult<SignatureBuffer> {
     validate_digest_length(digest, hash_alg)?;
     let private_key = parse_rsa_private_key(private_key_der)?;
     validate_rsa_private_key_size(&private_key)?;
@@ -700,9 +727,10 @@ pub(crate) fn rsa_pkcs1v15_sign_prehashed(
         HashAlg::Sha512 => Pkcs1v15Sign::new::<Sha512>(),
     };
 
-    private_key
+    let signature = private_key
         .sign(scheme, digest)
-        .map_err(|_| HsmError::GeneralError)
+        .map_err(|_| HsmError::GeneralError)?;
+    SignatureBuffer::try_from(&signature[..]).map_err(|_| HsmError::SignatureLenRange)
 }
 
 /// RSA PKCS#1 v1.5 verify with a pre-computed digest.
@@ -739,7 +767,7 @@ pub(crate) fn rsa_pss_sign_prehashed(
     private_key_der: &[u8],
     digest: &[u8],
     hash_alg: HashAlg,
-) -> HsmResult<Vec<u8>> {
+) -> HsmResult<SignatureBuffer> {
     use crate::crypto::drbg::DrbgRng;
     use rsa::pss::SigningKey;
     use rsa::signature::hazmat::RandomizedPrehashSigner;
@@ -757,21 +785,24 @@ pub(crate) fn rsa_pss_sign_prehashed(
             let signature = signing_key
                 .sign_prehash_with_rng(&mut rng, digest)
                 .map_err(|_| HsmError::GeneralError)?;
-            Ok(signature.to_vec())
+            SignatureBuffer::try_from(&signature.to_bytes()[..])
+                .map_err(|_| HsmError::SignatureLenRange)
         }
         HashAlg::Sha384 => {
             let signing_key = SigningKey::<Sha384>::new(private_key);
             let signature = signing_key
                 .sign_prehash_with_rng(&mut rng, digest)
                 .map_err(|_| HsmError::GeneralError)?;
-            Ok(signature.to_vec())
+            SignatureBuffer::try_from(&signature.to_bytes()[..])
+                .map_err(|_| HsmError::SignatureLenRange)
         }
         HashAlg::Sha512 => {
             let signing_key = SigningKey::<Sha512>::new(private_key);
             let signature = signing_key
                 .sign_prehash_with_rng(&mut rng, digest)
                 .map_err(|_| HsmError::GeneralError)?;
-            Ok(signature.to_vec())
+            SignatureBuffer::try_from(&signature.to_bytes()[..])
+                .map_err(|_| HsmError::SignatureLenRange)
         }
     }
 }
@@ -822,7 +853,7 @@ pub(crate) fn rsa_pss_verify_prehashed(
 pub(crate) fn ecdsa_p256_sign_prehashed(
     private_key_bytes: &[u8],
     digest: &[u8],
-) -> HsmResult<Vec<u8>> {
+) -> HsmResult<SignatureBuffer> {
     use crate::crypto::drbg::DrbgRng;
     use p256::ecdsa::signature::hazmat::RandomizedPrehashSigner;
     use p256::ecdsa::SigningKey;
@@ -835,7 +866,8 @@ pub(crate) fn ecdsa_p256_sign_prehashed(
     let signature: p256::ecdsa::Signature = signing_key
         .sign_prehash_with_rng(&mut rng, digest)
         .map_err(|_| HsmError::GeneralError)?;
-    Ok(signature.to_der().to_bytes().to_vec())
+    let signature_bytes = signature.to_der().to_bytes();
+    SignatureBuffer::try_from(&signature_bytes[..]).map_err(|_| HsmError::SignatureLenRange)
 }
 
 /// ECDSA P-256 verify with a pre-computed digest.
@@ -867,7 +899,7 @@ pub(crate) fn ecdsa_p256_verify_prehashed(
 pub(crate) fn ecdsa_p384_sign_prehashed(
     private_key_bytes: &[u8],
     digest: &[u8],
-) -> HsmResult<Vec<u8>> {
+) -> HsmResult<SignatureBuffer> {
     use crate::crypto::drbg::DrbgRng;
     use p384::ecdsa::signature::hazmat::RandomizedPrehashSigner;
     use p384::ecdsa::SigningKey;
@@ -880,7 +912,8 @@ pub(crate) fn ecdsa_p384_sign_prehashed(
     let signature: p384::ecdsa::Signature = signing_key
         .sign_prehash_with_rng(&mut rng, digest)
         .map_err(|_| HsmError::GeneralError)?;
-    Ok(signature.to_der().to_bytes().to_vec())
+    let signature_bytes = signature.to_der().to_bytes();
+    SignatureBuffer::try_from(&signature_bytes[..]).map_err(|_| HsmError::SignatureLenRange)
 }
 
 /// ECDSA P-384 verify with a pre-computed digest.

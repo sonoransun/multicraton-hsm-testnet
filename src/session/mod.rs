@@ -5,3 +5,6 @@
 pub mod handle;
 pub mod manager;
 pub mod session;
+pub mod tls_cache;
+// Temporarily disabled to focus on wrapped key functionality
+// pub mod enhanced_manager;

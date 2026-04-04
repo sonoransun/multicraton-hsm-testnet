@@ -176,3 +176,80 @@ impl<D: Digest + Send + Sync> Drop for GenericHasher<D> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pkcs11_abi::constants::*;
+
+    #[test]
+    fn test_sha256_compute_digest() {
+        // NIST FIPS 180-4 test vector: SHA-256("abc")
+        let result = compute_digest(CKM_SHA256, b"abc").unwrap();
+        assert_eq!(
+            hex::encode(&result),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn test_sha512_compute_digest() {
+        let result = compute_digest(CKM_SHA512, b"abc").unwrap();
+        assert_eq!(result.len(), 64);
+    }
+
+    #[test]
+    fn test_sha3_256_compute_digest() {
+        // SHA3-256("abc") NIST test vector
+        let result = compute_digest(CKM_SHA3_256, b"abc").unwrap();
+        assert_eq!(
+            hex::encode(&result),
+            "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532"
+        );
+    }
+
+    #[test]
+    fn test_invalid_mechanism() {
+        assert!(compute_digest(0xDEADBEEF, b"abc").is_err());
+    }
+
+    #[test]
+    fn test_digest_output_lengths() {
+        assert_eq!(digest_output_len(CKM_SHA_1).unwrap(), 20);
+        assert_eq!(digest_output_len(CKM_SHA256).unwrap(), 32);
+        assert_eq!(digest_output_len(CKM_SHA384).unwrap(), 48);
+        assert_eq!(digest_output_len(CKM_SHA512).unwrap(), 64);
+        assert_eq!(digest_output_len(CKM_SHA3_256).unwrap(), 32);
+        assert_eq!(digest_output_len(CKM_SHA3_384).unwrap(), 48);
+        assert_eq!(digest_output_len(CKM_SHA3_512).unwrap(), 64);
+    }
+
+    #[test]
+    fn test_multipart_matches_single_shot() {
+        // create_hasher -> update chunks -> finalize vs compute_digest
+        let data = b"The quick brown fox jumps over the lazy dog";
+        let single_shot = compute_digest(CKM_SHA256, data).unwrap();
+
+        let mut hasher = create_hasher(CKM_SHA256).unwrap();
+        hasher.update(&data[..10]);
+        hasher.update(&data[10..30]);
+        hasher.update(&data[30..]);
+        let multipart = hasher.finalize();
+
+        assert_eq!(single_shot, multipart);
+    }
+
+    #[test]
+    fn test_empty_input() {
+        // SHA-256 of empty string is a well-known value
+        let result = compute_digest(CKM_SHA256, b"").unwrap();
+        assert_eq!(
+            hex::encode(&result),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+
+        // SHA-512 of empty string
+        let result = compute_digest(CKM_SHA512, b"").unwrap();
+        assert_eq!(result.len(), 64);
+    }
+}

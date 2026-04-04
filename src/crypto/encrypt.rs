@@ -752,3 +752,489 @@ fn aes_ctr_apply(key: &[u8], iv: &[u8], data: &[u8]) -> HsmResult<Vec<u8>> {
 
     Ok(output)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Generate a unique 256-bit key to avoid cross-test interference
+    /// via the static DashMaps.
+    fn unique_key_256() -> [u8; 32] {
+        let mut key = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key);
+        key
+    }
+
+    /// Generate a unique 128-bit key.
+    fn unique_key_128() -> [u8; 16] {
+        let mut key = [0u8; 16];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key);
+        key
+    }
+
+    /// Generate a unique 192-bit key.
+    fn unique_key_192() -> [u8; 24] {
+        let mut key = [0u8; 24];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key);
+        key
+    }
+
+    /// Generate a unique 16-byte IV guaranteed to be non-zero.
+    fn unique_iv() -> [u8; 16] {
+        let mut iv = [0u8; 16];
+        loop {
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut iv);
+            // Ensure at least one byte is non-zero (extremely unlikely to fail)
+            if iv.iter().any(|&b| b != 0) {
+                break;
+            }
+        }
+        iv
+    }
+
+    // ========================================================================
+    // AES-256-GCM tests
+    // ========================================================================
+
+    #[test]
+    fn test_gcm_roundtrip() {
+        let key = unique_key_256();
+        let plaintext = b"Hello, AES-256-GCM roundtrip test!";
+
+        let encrypted = aes_256_gcm_encrypt(&key, plaintext).expect("encrypt failed");
+        // Output should be at least 12 (nonce) + 16 (tag) + plaintext length
+        assert!(encrypted.len() >= 12 + 16 + plaintext.len());
+
+        let decrypted = aes_256_gcm_decrypt(&key, &encrypted).expect("decrypt failed");
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_gcm_roundtrip_with_aad() {
+        let key = unique_key_256();
+        let plaintext = b"Authenticated data roundtrip";
+        let aad = b"context-binding-metadata";
+
+        let encrypted =
+            aes_256_gcm_encrypt_with_aad(&key, plaintext, aad).expect("encrypt with AAD failed");
+        let decrypted =
+            aes_256_gcm_decrypt_with_aad(&key, &encrypted, aad).expect("decrypt with AAD failed");
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_gcm_aad_mismatch_fails() {
+        let key = unique_key_256();
+        let plaintext = b"AAD mismatch test";
+        let aad_a = b"correct-aad";
+        let aad_b = b"wrong-aad";
+
+        let encrypted =
+            aes_256_gcm_encrypt_with_aad(&key, plaintext, aad_a).expect("encrypt failed");
+        let result = aes_256_gcm_decrypt_with_aad(&key, &encrypted, aad_b);
+        assert!(
+            matches!(result, Err(HsmError::EncryptedDataInvalid)),
+            "expected EncryptedDataInvalid on AAD mismatch, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_gcm_invalid_key_length() {
+        let plaintext = b"key length test";
+
+        // 16-byte key (AES-128 is not supported by aes_256_gcm_encrypt)
+        let key_16 = [0xAAu8; 16];
+        assert!(matches!(
+            aes_256_gcm_encrypt(&key_16, plaintext),
+            Err(HsmError::KeySizeRange)
+        ));
+
+        // 24-byte key (AES-192)
+        let key_24 = [0xBBu8; 24];
+        assert!(matches!(
+            aes_256_gcm_encrypt(&key_24, plaintext),
+            Err(HsmError::KeySizeRange)
+        ));
+
+        // Empty key
+        let key_0: [u8; 0] = [];
+        assert!(matches!(
+            aes_256_gcm_encrypt(&key_0, plaintext),
+            Err(HsmError::KeySizeRange)
+        ));
+
+        // 33-byte key
+        let key_33 = [0xCCu8; 33];
+        assert!(matches!(
+            aes_256_gcm_encrypt(&key_33, plaintext),
+            Err(HsmError::KeySizeRange)
+        ));
+
+        // Also check decrypt rejects invalid key lengths
+        assert!(matches!(
+            aes_256_gcm_decrypt(&key_16, &[0u8; 28]),
+            Err(HsmError::KeySizeRange)
+        ));
+    }
+
+    #[test]
+    fn test_gcm_decrypt_too_short() {
+        let key = unique_key_256();
+
+        // Data shorter than nonce (12) + tag (16) = 28 bytes
+        assert!(matches!(
+            aes_256_gcm_decrypt(&key, &[]),
+            Err(HsmError::EncryptedDataInvalid)
+        ));
+        assert!(matches!(
+            aes_256_gcm_decrypt(&key, &[0u8; 12]),
+            Err(HsmError::EncryptedDataInvalid)
+        ));
+        assert!(matches!(
+            aes_256_gcm_decrypt(&key, &[0u8; 27]),
+            Err(HsmError::EncryptedDataInvalid)
+        ));
+
+        // Exactly 28 bytes is the minimum (12 nonce + 16 tag, 0 plaintext)
+        // but it will fail auth check since it's not a valid ciphertext
+        // from our encrypt function. The point is it passes the length check.
+        let result = aes_256_gcm_decrypt(&key, &[0u8; 28]);
+        assert!(matches!(result, Err(HsmError::EncryptedDataInvalid)));
+    }
+
+    #[test]
+    fn test_gcm_nonce_uniqueness() {
+        let key = unique_key_256();
+        let plaintext = b"nonce uniqueness test";
+
+        let mut nonces = std::collections::HashSet::new();
+        for _ in 0..100 {
+            let encrypted = aes_256_gcm_encrypt(&key, plaintext).expect("encrypt failed");
+            let nonce: [u8; 12] = encrypted[..12].try_into().unwrap();
+            assert!(
+                nonces.insert(nonce),
+                "Duplicate nonce detected! Nonce reuse is a critical GCM vulnerability."
+            );
+        }
+        assert_eq!(nonces.len(), 100);
+    }
+
+    #[test]
+    fn test_gcm_counter_reset() {
+        let key = unique_key_256();
+        let plaintext = b"counter reset test";
+
+        // Encrypt once to establish a counter for this key
+        let encrypted = aes_256_gcm_encrypt(&key, plaintext).expect("first encrypt failed");
+        let decrypted = aes_256_gcm_decrypt(&key, &encrypted).expect("first decrypt failed");
+        assert_eq!(decrypted, plaintext);
+
+        // Remove the counter for this specific key
+        remove_gcm_counter(&key);
+
+        // Encrypt again -- should work with a fresh counter (and new random prefix)
+        let encrypted2 = aes_256_gcm_encrypt(&key, plaintext).expect("second encrypt failed");
+        let decrypted2 = aes_256_gcm_decrypt(&key, &encrypted2).expect("second decrypt failed");
+        assert_eq!(decrypted2, plaintext);
+    }
+
+    #[test]
+    fn test_gcm_force_reset() {
+        // Use dedicated keys for this test
+        let key_a = unique_key_256();
+        let key_b = unique_key_256();
+        let plaintext = b"force reset test";
+
+        // Establish counters for both keys
+        aes_256_gcm_encrypt(&key_a, plaintext).expect("encrypt key_a failed");
+        aes_256_gcm_encrypt(&key_b, plaintext).expect("encrypt key_b failed");
+
+        // Force reset all counters
+        force_reset_all_counters();
+
+        // Both keys should be able to encrypt again with fresh counters
+        let enc_a =
+            aes_256_gcm_encrypt(&key_a, plaintext).expect("post-reset encrypt key_a failed");
+        let enc_b =
+            aes_256_gcm_encrypt(&key_b, plaintext).expect("post-reset encrypt key_b failed");
+
+        // Verify roundtrip still works
+        assert_eq!(
+            aes_256_gcm_decrypt(&key_a, &enc_a).expect("decrypt a"),
+            plaintext
+        );
+        assert_eq!(
+            aes_256_gcm_decrypt(&key_b, &enc_b).expect("decrypt b"),
+            plaintext
+        );
+    }
+
+    #[test]
+    fn test_gcm_decrypt_tampered() {
+        let key = unique_key_256();
+        let plaintext = b"tamper detection test";
+
+        let mut encrypted = aes_256_gcm_encrypt(&key, plaintext).expect("encrypt failed");
+
+        // Tamper with a byte in the ciphertext portion (after the 12-byte nonce)
+        let tamper_idx = 12 + (encrypted.len() - 12) / 2;
+        encrypted[tamper_idx] ^= 0xFF;
+
+        let result = aes_256_gcm_decrypt(&key, &encrypted);
+        assert!(
+            matches!(result, Err(HsmError::EncryptedDataInvalid)),
+            "expected EncryptedDataInvalid on tampered ciphertext, got {:?}",
+            result
+        );
+    }
+
+    // ========================================================================
+    // AES-CBC tests
+    // ========================================================================
+
+    #[test]
+    fn test_cbc_roundtrip() {
+        // Test all three valid key sizes: 128, 192, 256 bits
+        let keys: Vec<Vec<u8>> = vec![
+            unique_key_128().to_vec(),
+            unique_key_192().to_vec(),
+            unique_key_256().to_vec(),
+        ];
+        let plaintext = b"CBC roundtrip works for all key sizes!";
+
+        for key in &keys {
+            let iv = unique_iv();
+            let ciphertext = aes_cbc_encrypt(key, &iv, plaintext).expect("CBC encrypt failed");
+
+            // CBC ciphertext should be padded to block boundary
+            assert_eq!(ciphertext.len() % 16, 0);
+
+            let decrypted = aes_cbc_decrypt(key, &iv, &ciphertext).expect("CBC decrypt failed");
+            assert_eq!(
+                decrypted,
+                plaintext,
+                "CBC roundtrip failed for {}-bit key",
+                key.len() * 8
+            );
+        }
+    }
+
+    #[test]
+    fn test_cbc_rejects_zero_iv() {
+        let key = unique_key_256();
+        let zero_iv = [0u8; 16];
+        let plaintext = b"should fail with zero IV";
+
+        let result = aes_cbc_encrypt(&key, &zero_iv, plaintext);
+        assert!(
+            matches!(result, Err(HsmError::MechanismParamInvalid)),
+            "expected MechanismParamInvalid for zero IV, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_cbc_rejects_invalid_iv_length() {
+        let key = unique_key_256();
+        let plaintext = b"IV length test";
+
+        // 0-byte IV
+        assert!(matches!(
+            aes_cbc_encrypt(&key, &[], plaintext),
+            Err(HsmError::MechanismParamInvalid)
+        ));
+
+        // 8-byte IV
+        assert!(matches!(
+            aes_cbc_encrypt(&key, &[1u8; 8], plaintext),
+            Err(HsmError::MechanismParamInvalid)
+        ));
+
+        // 15-byte IV
+        assert!(matches!(
+            aes_cbc_encrypt(&key, &[1u8; 15], plaintext),
+            Err(HsmError::MechanismParamInvalid)
+        ));
+
+        // 17-byte IV
+        assert!(matches!(
+            aes_cbc_encrypt(&key, &[1u8; 17], plaintext),
+            Err(HsmError::MechanismParamInvalid)
+        ));
+    }
+
+    #[test]
+    fn test_cbc_invalid_key_size() {
+        let iv = unique_iv();
+        let plaintext = b"invalid key size test";
+
+        // 15-byte key
+        assert!(matches!(
+            aes_cbc_encrypt(&[0xAAu8; 15], &iv, plaintext),
+            Err(HsmError::KeySizeRange)
+        ));
+
+        // 20-byte key
+        let iv2 = unique_iv();
+        assert!(matches!(
+            aes_cbc_encrypt(&[0xBBu8; 20], &iv2, plaintext),
+            Err(HsmError::KeySizeRange)
+        ));
+
+        // 33-byte key
+        let iv3 = unique_iv();
+        assert!(matches!(
+            aes_cbc_encrypt(&[0xCCu8; 33], &iv3, plaintext),
+            Err(HsmError::KeySizeRange)
+        ));
+    }
+
+    #[test]
+    fn test_cbc_pkcs7_padding() {
+        // Test with various non-block-aligned plaintext sizes
+        let key = unique_key_256();
+        let test_sizes = [1, 7, 15, 16, 17, 31, 32, 33, 100];
+
+        for &size in &test_sizes {
+            let iv = unique_iv();
+            let plaintext: Vec<u8> = (0..size).map(|i| (i & 0xFF) as u8).collect();
+
+            let ciphertext = aes_cbc_encrypt(&key, &iv, &plaintext).expect("CBC encrypt failed");
+            // PKCS#7 always pads, so ciphertext is always a multiple of 16
+            // and at least plaintext.len() + 1 rounded up to 16
+            assert_eq!(ciphertext.len() % 16, 0);
+            assert!(ciphertext.len() >= plaintext.len());
+
+            let decrypted = aes_cbc_decrypt(&key, &iv, &ciphertext).expect("CBC decrypt failed");
+            assert_eq!(
+                decrypted, plaintext,
+                "PKCS#7 padding roundtrip failed for plaintext size {}",
+                size
+            );
+        }
+    }
+
+    #[test]
+    fn test_cbc_iv_reuse_rejected() {
+        let key = unique_key_256();
+        let iv = unique_iv();
+        let plaintext = b"IV reuse detection test";
+
+        // First encryption with this IV should succeed
+        aes_cbc_encrypt(&key, &iv, plaintext).expect("first CBC encrypt failed");
+
+        // Second encryption with the same key + IV should be rejected
+        let result = aes_cbc_encrypt(&key, &iv, plaintext);
+        assert!(
+            matches!(result, Err(HsmError::MechanismParamInvalid)),
+            "expected MechanismParamInvalid on IV reuse, got {:?}",
+            result
+        );
+    }
+
+    // ========================================================================
+    // AES-CTR tests
+    // ========================================================================
+
+    #[test]
+    fn test_ctr_roundtrip() {
+        // Test all three valid key sizes
+        let keys: Vec<Vec<u8>> = vec![
+            unique_key_128().to_vec(),
+            unique_key_192().to_vec(),
+            unique_key_256().to_vec(),
+        ];
+        let plaintext = b"CTR mode roundtrip for all key sizes!";
+
+        for key in &keys {
+            let iv = unique_iv();
+            let ciphertext = aes_ctr_encrypt(key, &iv, plaintext).expect("CTR encrypt failed");
+            // CTR mode: ciphertext is same length as plaintext (no padding)
+            assert_eq!(ciphertext.len(), plaintext.len());
+
+            let decrypted = aes_ctr_decrypt(key, &iv, &ciphertext).expect("CTR decrypt failed");
+            assert_eq!(
+                decrypted,
+                plaintext,
+                "CTR roundtrip failed for {}-bit key",
+                key.len() * 8
+            );
+        }
+    }
+
+    #[test]
+    fn test_ctr_rejects_zero_iv() {
+        let key = unique_key_256();
+        let zero_iv = [0u8; 16];
+        let plaintext = b"should fail with zero IV";
+
+        let result = aes_ctr_encrypt(&key, &zero_iv, plaintext);
+        assert!(
+            matches!(result, Err(HsmError::MechanismParamInvalid)),
+            "expected MechanismParamInvalid for zero IV, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_ctr_iv_reuse_rejected_on_encrypt() {
+        let key = unique_key_256();
+        let iv = unique_iv();
+        let plaintext = b"CTR IV reuse on encrypt";
+
+        // First encryption should succeed
+        aes_ctr_encrypt(&key, &iv, plaintext).expect("first CTR encrypt failed");
+
+        // Second encryption with same key + IV should be rejected
+        let result = aes_ctr_encrypt(&key, &iv, plaintext);
+        assert!(
+            matches!(result, Err(HsmError::MechanismParamInvalid)),
+            "expected MechanismParamInvalid on CTR IV reuse, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_ctr_decrypt_allows_iv_reuse() {
+        let key = unique_key_256();
+        let iv = unique_iv();
+        let plaintext = b"CTR decrypt allows IV reuse";
+
+        // Encrypt to get ciphertext
+        let ciphertext = aes_ctr_encrypt(&key, &iv, plaintext).expect("CTR encrypt failed");
+
+        // Decrypt should work (first time)
+        let dec1 = aes_ctr_decrypt(&key, &iv, &ciphertext).expect("first CTR decrypt failed");
+        assert_eq!(dec1, plaintext);
+
+        // Decrypt again with same key + IV -- should still work
+        // (decrypt does not track IVs)
+        let dec2 = aes_ctr_decrypt(&key, &iv, &ciphertext).expect("second CTR decrypt failed");
+        assert_eq!(dec2, plaintext);
+    }
+
+    #[test]
+    fn test_ctr_invalid_key_size() {
+        let iv = unique_iv();
+        let plaintext = b"invalid key size test";
+
+        // 15-byte key
+        assert!(matches!(
+            aes_ctr_encrypt(&[0xAAu8; 15], &iv, plaintext),
+            Err(HsmError::KeySizeRange)
+        ));
+
+        // 20-byte key
+        assert!(matches!(
+            aes_ctr_encrypt(&[0xBBu8; 20], &iv, plaintext),
+            Err(HsmError::KeySizeRange)
+        ));
+
+        // 33-byte key
+        assert!(matches!(
+            aes_ctr_encrypt(&[0xCCu8; 33], &iv, plaintext),
+            Err(HsmError::KeySizeRange)
+        ));
+    }
+}

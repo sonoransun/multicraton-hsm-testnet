@@ -22,6 +22,83 @@ rustcrypto-backend = []
 awslc-backend = ["dep:aws-lc-rs"]
 fips = []
 
+# Core Advanced Features (stable)
+wrapped-keys = ["serde_with"]
+quantum-resistant = []
+observability = ["prometheus", "axum"]
+
+# Advanced Feature Sets (placeholder implementations for cutting-edge capabilities)
+zkp = []
+threshold = []
+gpu-acceleration = ["dep:rayon"]
+ml-analytics = []
+policy-engine = []
+cloud-kms = []
+fhe = []
+advanced-serialization = []
+performance = []
+networking = []
+enhanced-storage = []
+
+# ── Cutting-edge cryptographic capabilities ──────────────────────────────────
+
+# BLAKE3: parallel tree-hashing, 3× faster than SHA-256, used in BAO/Zcash
+blake3-hash = ["dep:blake3"]
+
+# Hybrid KEM: X25519 + ML-KEM-768 dual-encapsulation (NIST IR 8413, CNSA 2.0)
+hybrid-kem = ["dep:x25519-dalek", "dep:chacha20poly1305"]
+
+# ChaCha20-Poly1305 / XChaCha20 AEAD — nonce-misuse resistant AEAD
+chacha20-aead = ["dep:chacha20poly1305"]
+
+# Argon2id: OWASP-recommended memory-hard KDF replacing PBKDF2 for new keys
+argon2-kdf = ["dep:argon2"]
+
+# BLS12-381: aggregatable pairing-based signatures (Ethereum 2.0, threshold schemes)
+bls-signatures = ["dep:blst"]
+
+# OPAQUE: disabled due to opaque-ke v2 pinning curve25519-dalek pre-release
+# which conflicts with x25519-dalek. Re-enable when opaque-ke v3+ is available.
+# opaque-auth = ["dep:opaque-ke", "dep:generic-array-opaque"]
+
+# STARK proofs: transparent, post-quantum ZK proofs (Polygon Miden / Winterfell)
+stark-proofs = ["dep:winterfell"]
+
+# Fully Homomorphic Encryption: compute on encrypted data without decryption (Zama TFHE-rs)
+fhe-compute = ["dep:tfhe"]
+
+# TPM 2.0: hardware root-of-trust, PCR-sealed key storage, platform attestation
+tpm-binding = ["dep:tss-esapi"]
+
+# QUIC transport: 0-RTT encrypted cluster networking via quinn (HTTP/3 transport)
+quic-transport = ["dep:quinn"]
+
+# Noise Protocol Framework: Signal-protocol-grade encrypted P2P channels via snow
+noise-protocol = ["dep:snow"]
+
+# WebAssembly plugins: sandboxed custom crypto extensions via wasmtime + cranelift
+wasm-plugins = ["dep:wasmtime"]
+
+# ONNX analytics: pure-Rust ML inference for anomaly detection via tract-onnx
+onnx-analytics = ["dep:tract-onnx"]
+
+# Verifiable OPRF: disabled due to curve25519-dalek conflict with opaque-ke
+# voprf-protocol = ["dep:voprf"]
+
+# Combined Feature Sets
+advanced-all = [
+    "wrapped-keys", "quantum-resistant", "observability", "zkp", "threshold",
+    "gpu-acceleration", "ml-analytics", "policy-engine", "cloud-kms", "fhe",
+    "advanced-serialization", "performance", "networking", "enhanced-storage",
+    # Cutting-edge additions
+    "blake3-hash", "hybrid-kem", "chacha20-aead", "argon2-kdf",
+    "bls-signatures", "stark-proofs", "noise-protocol", "onnx-analytics"
+    # Note: fhe-compute, tpm-binding, quic-transport, wasm-plugins excluded from
+    # advanced-all due to large build footprint — enable individually as needed.
+    # voprf-protocol excluded due to curve25519-dalek version conflict with opaque-auth.
+]
+enterprise = ["wrapped-keys", "observability"]
+
 [dependencies]
 # Cryptographic primitives
 rsa = { version = "0.9", features = ["sha2"] }
@@ -60,6 +137,7 @@ rand_core_new = { package = "rand_core", version = "0.10" }
 # Key material safety
 zeroize = { version = "1", features = ["derive"] }
 secrecy = "0.10"
+arrayvec = "0.7"
 
 # Storage
 redb = "3"
@@ -74,6 +152,11 @@ toml = "1"
 serde = { version = "1", features = ["derive"] }
 tracing = { version = "0.1", features = ["max_level_info", "release_max_level_info"] }
 tracing-subscriber = { version = "0.3", features = ["json"] }
+
+# Observability and metrics
+prometheus = { version = "0.13", optional = true }
+axum = { version = "0.7", features = ["tokio"], optional = true }
+tokio = { version = "1", features = ["full"] }
 
 # Randomness
 rand = "0.8"
@@ -91,6 +174,91 @@ hex = "0.4"
 # Optional FIPS-validated backend
 aws-lc-rs = { version = "1", features = ["fips"], optional = true }
 
+# Enhanced cryptography and algorithms
+k256 = { version = "0.13", features = ["ecdsa", "sha256"] }
+ed448 = "0.1"
+
+# PKCS parsing and ASN.1 handling for wrapped key import/export
+pkcs8 = "0.10"
+pkcs12 = { version = "0.2.0-pre.0" }
+der = "0.7"
+pem = "3.0"
+base64 = "0.21"
+
+# Enhanced JSON handling
+serde_with = { version = "3.4", optional = true }
+
+# HSM clustering and distributed operations
+uuid = { version = "1", features = ["v4", "serde"] }
+async-trait = "0.1"
+fastrand = "2"
+bincode = "1"
+
+# Network and TLS for clustering
+tokio-rustls = "0.24"
+rustls = "0.21"
+webpki-roots = "0.25"
+
+# Additional dependencies for enhanced features
+num_cpus = "1"
+chrono = { version = "0.4", features = ["serde"] }
+bitflags = "2"
+
+# CPU parallelism for batch crypto operations (gpu-acceleration feature)
+rayon = { version = "1.10", optional = true }
+
+# ── Cutting-edge optional dependencies ───────────────────────────────────────
+
+# BLAKE3: parallel Merkle-tree hash (BLAKE3 team / Zcash Foundation)
+blake3 = { version = "1", optional = true }
+
+# X25519 Diffie-Hellman for Hybrid KEM (static_secrets needed for long-term keys)
+x25519-dalek = { version = "2", features = ["static_secrets"], optional = true }
+
+# ChaCha20-Poly1305 / XChaCha20-Poly1305 AEAD (RustCrypto)
+chacha20poly1305 = { version = "0.10", optional = true }
+
+# Argon2id memory-hard KDF (replaces PBKDF2 for newly provisioned tokens)
+argon2 = { version = "0.5", optional = true }
+
+# blst: BLS12-381 signatures — Ethereum Foundation reference impl (C-backed, ~2× faster than pure Rust)
+blst = { version = "0.3", optional = true }
+
+# opaque-ke: disabled — pins curve25519-dalek =4.0.0-pre.1, conflicts with x25519-dalek
+# opaque-ke = { version = "2", optional = true }
+# generic-array-opaque = { package = "generic-array", version = "0.14", optional = true }
+
+# Winterfell: STARK proof system by Polygon Miden — transparent, post-quantum ZK
+winterfell = { version = "0.9", optional = true }
+
+# tfhe-rs: Fully Homomorphic Encryption by Zama — compute on encrypted integers
+# WARNING: increases compile time significantly; enable only when needed
+tfhe = { version = "0.10", features = ["integer"], optional = true }
+
+# tss-esapi: TPM 2.0 TSS Enhanced API — requires libtss2 system library on Linux
+# Provides hardware root-of-trust: PCR sealing, platform attestation, TPM RNG
+tss-esapi = { version = "=8.0.0-alpha.2", optional = true }
+
+# quinn: QUIC transport (HTTP/3) — 0-RTT reconnects, built-in TLS 1.3, stream multiplexing
+# Note: uses rustls 0.23 independently of the cluster's rustls 0.21 (feature-isolated)
+quinn = { version = "0.11", optional = true }
+
+# snow: Noise Protocol Framework — Signal-grade encrypted channels without PKI
+snow = { version = "0.9", optional = true }
+
+# wasmtime: WebAssembly runtime with Cranelift JIT — sandboxed crypto plugin execution
+# WARNING: large dependency (~50 MB debug); enable only for plugin deployments
+wasmtime = { version = "25", features = ["cranelift"], optional = true }
+
+# tract-onnx: pure-Rust ONNX inference — no C/Python deps, runs neural nets in-process
+tract-onnx = { version = "0.21", optional = true }
+
+# voprf: Verifiable Oblivious PRF (IETF RFC 9497) — private token issuance, rate limiting
+# voprf disabled: curve25519-dalek version conflict with opaque-ke
+# voprf = { version = "0.5", optional = true }
+
+# Core enhanced functionality that was successfully implemented
+
 # Unix process ID for fork detection
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -104,6 +272,7 @@ tempfile = "3"
 hex = "0.4"
 criterion = { version = "0.8", features = ["html_reports"] }
 libloading = "0.9"
+wat = "1.0"
 # craton_hsm-awslc: only available with the enterprise repo; see docs/fips-mode-guide.md
 # To run FIPS backend tests locally, clone craton_hsm-enterprise alongside this repo and uncomment:
 # craton_hsm-awslc = { path = "../craton_hsm-enterprise/craton_hsm-awslc" }

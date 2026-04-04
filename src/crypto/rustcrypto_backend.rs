@@ -25,6 +25,7 @@ impl CryptoBackend for RustCryptoBackend {
         hash_alg: Option<HashAlg>,
     ) -> HsmResult<Vec<u8>> {
         super::sign::rsa_pkcs1v15_sign(private_key_der, data, hash_alg)
+            .map(|sig_buf| sig_buf.into_iter().collect())
     }
 
     fn rsa_pkcs1v15_verify(
@@ -45,6 +46,7 @@ impl CryptoBackend for RustCryptoBackend {
         hash_alg: HashAlg,
     ) -> HsmResult<Vec<u8>> {
         super::sign::rsa_pss_sign(private_key_der, data, hash_alg)
+            .map(|sig_buf| sig_buf.into_iter().collect())
     }
 
     fn rsa_pss_verify(
@@ -60,6 +62,7 @@ impl CryptoBackend for RustCryptoBackend {
 
     fn ecdsa_p256_sign(&self, private_key_bytes: &[u8], data: &[u8]) -> HsmResult<Vec<u8>> {
         super::sign::ecdsa_p256_sign(private_key_bytes, data)
+            .map(|sig_buf| sig_buf.into_iter().collect())
     }
 
     fn ecdsa_p256_verify(
@@ -73,6 +76,7 @@ impl CryptoBackend for RustCryptoBackend {
 
     fn ecdsa_p384_sign(&self, private_key_bytes: &[u8], data: &[u8]) -> HsmResult<Vec<u8>> {
         super::sign::ecdsa_p384_sign(private_key_bytes, data)
+            .map(|sig_buf| sig_buf.into_iter().collect())
     }
 
     fn ecdsa_p384_verify(
@@ -86,6 +90,7 @@ impl CryptoBackend for RustCryptoBackend {
 
     fn ed25519_sign(&self, private_key_bytes: &[u8], data: &[u8]) -> HsmResult<Vec<u8>> {
         super::sign::ed25519_sign(private_key_bytes, data)
+            .map(|sig_buf| sig_buf.into_iter().collect())
     }
 
     fn ed25519_verify(
@@ -108,6 +113,7 @@ impl CryptoBackend for RustCryptoBackend {
         hash_alg: HashAlg,
     ) -> HsmResult<Vec<u8>> {
         super::sign::rsa_pkcs1v15_sign_prehashed(private_key_der, digest, hash_alg)
+            .map(|sig_buf| sig_buf.into_iter().collect())
     }
 
     fn rsa_pkcs1v15_verify_prehashed(
@@ -134,6 +140,7 @@ impl CryptoBackend for RustCryptoBackend {
         hash_alg: HashAlg,
     ) -> HsmResult<Vec<u8>> {
         super::sign::rsa_pss_sign_prehashed(private_key_der, digest, hash_alg)
+            .map(|sig_buf| sig_buf.into_iter().collect())
     }
 
     fn rsa_pss_verify_prehashed(
@@ -153,6 +160,7 @@ impl CryptoBackend for RustCryptoBackend {
         digest: &[u8],
     ) -> HsmResult<Vec<u8>> {
         super::sign::ecdsa_p256_sign_prehashed(private_key_bytes, digest)
+            .map(|sig_buf| sig_buf.into_iter().collect())
     }
 
     fn ecdsa_p256_verify_prehashed(
@@ -170,6 +178,7 @@ impl CryptoBackend for RustCryptoBackend {
         digest: &[u8],
     ) -> HsmResult<Vec<u8>> {
         super::sign::ecdsa_p384_sign_prehashed(private_key_bytes, digest)
+            .map(|sig_buf| sig_buf.into_iter().collect())
     }
 
     fn ecdsa_p384_verify_prehashed(
@@ -217,6 +226,7 @@ impl CryptoBackend for RustCryptoBackend {
         hash_alg: super::sign::OaepHash,
     ) -> HsmResult<Vec<u8>> {
         super::sign::rsa_oaep_encrypt(modulus, public_exponent, plaintext, hash_alg)
+            .map(|cipher_buf| cipher_buf.into_iter().collect())
     }
 
     fn rsa_oaep_decrypt(

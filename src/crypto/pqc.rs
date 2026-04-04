@@ -222,6 +222,7 @@ pub enum MlDsaVariant {
 
 /// Generate an ML-DSA keypair. Returns (signing_key_seed_32bytes, verifying_key_bytes).
 pub fn ml_dsa_keygen(variant: MlDsaVariant) -> HsmResult<(RawKeyMaterial, Vec<u8>)> {
+    use ml_dsa::signature::Keypair;
     use ml_dsa::KeyGen;
 
     let mut rng = new_rng()?;

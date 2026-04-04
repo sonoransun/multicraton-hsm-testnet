@@ -18,6 +18,9 @@ pub mod core;
 pub mod crypto;
 /// Error types — `HsmError` enum with `CK_RV` mapping.
 pub mod error;
+/// Metrics and observability — Prometheus-compatible metrics collection and HTTP server.
+#[cfg(feature = "observability")]
+pub mod metrics;
 /// PKCS#11 C ABI layer — types, constants, and 70+ `#[no_mangle]` function exports.
 ///
 /// This module uses PKCS#11 naming conventions (e.g., `CK_RV`, `CKR_OK`, `C_Initialize`)
@@ -33,3 +36,30 @@ pub mod session;
 pub mod store;
 /// Token and slot management — PIN hashing, login state, multi-slot support.
 pub mod token;
+
+/// Advanced cryptographic and enterprise features.
+///
+/// Includes: ZKP, threshold cryptography, GPU acceleration, ML analytics,
+/// policy engine, FHE, TPM binding, STARK proofs, WASM plugins, and attestation.
+/// Individual sub-modules are gated behind their own feature flags; this top-level
+/// module is enabled whenever any advanced feature is active.
+#[cfg(any(
+    feature = "advanced-all",
+    feature = "fhe-compute",
+    feature = "tpm-binding",
+    feature = "stark-proofs",
+    feature = "wasm-plugins",
+    feature = "zkp",
+    feature = "threshold",
+    feature = "gpu-acceleration",
+    feature = "ml-analytics",
+    feature = "policy-engine",
+    feature = "quantum-resistant",
+))]
+pub mod advanced;
+
+/// HSM clustering — Raft consensus, key replication, QUIC/Noise/mTLS transport.
+/// Feature-gated: the cluster module uses async traits and network transports
+/// that require explicit opt-in.
+#[cfg(feature = "networking")]
+pub mod cluster;

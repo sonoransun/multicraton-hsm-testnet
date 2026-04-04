@@ -95,6 +95,60 @@ enum KeyAction {
         #[arg(long, default_value_t = false)]
         force: bool,
     },
+    /// Wrap a key with another key
+    Wrap {
+        /// Wrapping key handle
+        #[arg(long)]
+        wrapping_key: u64,
+        /// Target key handle to wrap
+        #[arg(long)]
+        target_key: u64,
+        /// Output file path
+        #[arg(long)]
+        output: String,
+    },
+    /// Unwrap a wrapped key
+    Unwrap {
+        /// Unwrapping key handle
+        #[arg(long)]
+        unwrapping_key: u64,
+        /// Input file path with wrapped key
+        #[arg(long)]
+        input: String,
+        /// Label for the unwrapped key
+        #[arg(long)]
+        label: String,
+    },
+    /// Export wrapped key in structured format
+    ExportWrapped {
+        /// Wrapping key handle
+        #[arg(long)]
+        wrapping_key: u64,
+        /// Target key handle to export
+        #[arg(long)]
+        target_key: u64,
+        /// Export format (json, pkcs8, pkcs12)
+        #[arg(long, default_value = "json")]
+        format: String,
+        /// Output file path
+        #[arg(long)]
+        output: String,
+    },
+    /// Import wrapped key from structured format
+    ImportWrapped {
+        /// Unwrapping key handle
+        #[arg(long)]
+        unwrapping_key: u64,
+        /// Import format (json, pkcs8, pkcs12)
+        #[arg(long, default_value = "json")]
+        format: String,
+        /// Input file path
+        #[arg(long)]
+        input: String,
+        /// Label for the imported key
+        #[arg(long)]
+        label: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -145,6 +199,40 @@ fn main() {
             KeyAction::Delete { handle, force } => {
                 commands::key::delete(&cli.config, handle, force)
             }
+            KeyAction::Wrap {
+                wrapping_key,
+                target_key,
+                output,
+            } => commands::key::wrap_key(&cli.config, wrapping_key, target_key, &output),
+            KeyAction::Unwrap {
+                unwrapping_key,
+                input,
+                label,
+            } => commands::key::unwrap_key(&cli.config, unwrapping_key, &input, &label),
+            KeyAction::ExportWrapped {
+                wrapping_key,
+                target_key,
+                format,
+                output,
+            } => commands::key::export_wrapped_key(
+                &cli.config,
+                wrapping_key,
+                target_key,
+                &format,
+                &output,
+            ),
+            KeyAction::ImportWrapped {
+                unwrapping_key,
+                format,
+                input,
+                label,
+            } => commands::key::import_wrapped_key(
+                &cli.config,
+                unwrapping_key,
+                &format,
+                &input,
+                &label,
+            ),
         },
         Commands::Pin { action } => match action {
             PinAction::Change { user_type } => commands::pin::change(&cli.config, &user_type),

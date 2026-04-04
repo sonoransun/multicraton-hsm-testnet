@@ -27,6 +27,12 @@ service HsmService {
   rpc Decrypt(DecryptRequest) returns (DecryptResponse);
   rpc Digest(DigestRequest) returns (DigestResponse);
   rpc GenerateRandom(GenerateRandomRequest) returns (GenerateRandomResponse);
+
+  // Wrapped key operations
+  rpc WrapKey(WrapKeyRequest) returns (WrapKeyResponse);
+  rpc UnwrapKey(UnwrapKeyRequest) returns (UnwrapKeyResponse);
+  rpc ExportWrappedKey(ExportWrappedKeyRequest) returns (ExportWrappedKeyResponse);
+  rpc ImportWrappedKey(ImportWrappedKeyRequest) returns (ImportWrappedKeyResponse);
 }
 
 // ── Common types ─────────────────────────────────────────────────────────────
@@ -215,4 +221,53 @@ message GenerateRandomRequest {
 
 message GenerateRandomResponse {
   bytes random_data = 1;
+}
+
+// ── Wrapped Key Operations ───────────────────────────────────────────────────
+
+message WrapKeyRequest {
+  uint64 session_handle = 1;
+  Mechanism mechanism = 2;
+  uint64 wrapping_key_handle = 3;
+  uint64 key_to_wrap_handle = 4;
+}
+
+message WrapKeyResponse {
+  bytes wrapped_key = 1;
+}
+
+message UnwrapKeyRequest {
+  uint64 session_handle = 1;
+  Mechanism mechanism = 2;
+  uint64 unwrapping_key_handle = 3;
+  bytes wrapped_key = 4;
+  repeated Attribute template = 5;
+}
+
+message UnwrapKeyResponse {
+  uint64 unwrapped_key_handle = 1;
+}
+
+message ExportWrappedKeyRequest {
+  uint64 session_handle = 1;
+  uint64 wrapping_key_handle = 2;
+  uint64 key_to_export_handle = 3;
+  string format = 4; // "json", "pkcs8", "pkcs12"
+}
+
+message ExportWrappedKeyResponse {
+  bytes export_data = 1;
+  string content_type = 2;
+}
+
+message ImportWrappedKeyRequest {
+  uint64 session_handle = 1;
+  uint64 unwrapping_key_handle = 2;
+  bytes import_data = 3;
+  string format = 4; // "json", "pkcs8", "pkcs12"
+  repeated Attribute template = 5;
+}
+
+message ImportWrappedKeyResponse {
+  uint64 imported_key_handle = 1;
 }

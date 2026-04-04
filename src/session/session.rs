@@ -209,7 +209,7 @@ impl ActiveOperation {
         use sha2::Sha256;
         type HmacSha256 = Hmac<Sha256>;
         let mut mac =
-            HmacSha256::new_from_slice(state_hmac_key).expect("HMAC key length is always valid");
+            HmacSha256::new_from_slice(state_hmac_key).map_err(|_| HsmError::GeneralError)?;
         mac.update(&buf[..]);
         let tag = mac.finalize().into_bytes();
         buf.extend_from_slice(&tag);
@@ -249,7 +249,7 @@ impl ActiveOperation {
         use sha2::Sha256;
         type HmacSha256 = Hmac<Sha256>;
         let mut mac =
-            HmacSha256::new_from_slice(state_hmac_key).expect("HMAC key length is always valid");
+            HmacSha256::new_from_slice(state_hmac_key).map_err(|_| HsmError::GeneralError)?;
         mac.update(payload);
         mac.verify_slice(provided_tag)
             .map_err(|_| HsmError::DataInvalid)?;
@@ -447,5 +447,205 @@ impl Session {
             flags: self.flags,
             device_error: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rw_session() -> Session {
+        Session::new(1, 0, CKF_RW_SESSION | CKF_SERIAL_SESSION)
+    }
+
+    fn ro_session() -> Session {
+        Session::new(2, 0, CKF_SERIAL_SESSION)
+    }
+
+    // ── SessionState tests ──
+
+    #[test]
+    fn test_state_is_rw() {
+        assert!(!SessionState::RoPublic.is_rw());
+        assert!(!SessionState::RoUser.is_rw());
+        assert!(SessionState::RwPublic.is_rw());
+        assert!(SessionState::RwUser.is_rw());
+        assert!(SessionState::RwSO.is_rw());
+    }
+
+    #[test]
+    fn test_state_is_logged_in() {
+        assert!(!SessionState::RoPublic.is_logged_in());
+        assert!(SessionState::RoUser.is_logged_in());
+        assert!(!SessionState::RwPublic.is_logged_in());
+        assert!(SessionState::RwUser.is_logged_in());
+        assert!(SessionState::RwSO.is_logged_in());
+    }
+
+    #[test]
+    fn test_state_to_ck_state() {
+        assert_eq!(SessionState::RoPublic.to_ck_state(), CKS_RO_PUBLIC_SESSION);
+        assert_eq!(SessionState::RoUser.to_ck_state(), CKS_RO_USER_FUNCTIONS);
+        assert_eq!(SessionState::RwPublic.to_ck_state(), CKS_RW_PUBLIC_SESSION);
+        assert_eq!(SessionState::RwUser.to_ck_state(), CKS_RW_USER_FUNCTIONS);
+        assert_eq!(SessionState::RwSO.to_ck_state(), CKS_RW_SO_FUNCTIONS);
+    }
+
+    // ── Session state transition tests ──
+
+    #[test]
+    fn test_rw_session_starts_rw_public() {
+        let s = rw_session();
+        assert_eq!(s.state, SessionState::RwPublic);
+        assert!(s.is_rw());
+    }
+
+    #[test]
+    fn test_ro_session_starts_ro_public() {
+        let s = ro_session();
+        assert_eq!(s.state, SessionState::RoPublic);
+        assert!(!s.is_rw());
+    }
+
+    #[test]
+    fn test_user_login_rw_public_to_rw_user() {
+        let mut s = rw_session();
+        s.on_user_login().unwrap();
+        assert_eq!(s.state, SessionState::RwUser);
+    }
+
+    #[test]
+    fn test_user_login_ro_public_to_ro_user() {
+        let mut s = ro_session();
+        s.on_user_login().unwrap();
+        assert_eq!(s.state, SessionState::RoUser);
+    }
+
+    #[test]
+    fn test_so_login_rw_public_to_rw_so() {
+        let mut s = rw_session();
+        s.on_so_login().unwrap();
+        assert_eq!(s.state, SessionState::RwSO);
+    }
+
+    #[test]
+    fn test_so_login_ro_rejected() {
+        let mut s = ro_session();
+        assert!(matches!(s.on_so_login(), Err(HsmError::SessionReadOnly)));
+    }
+
+    #[test]
+    fn test_double_login_rejected() {
+        let mut s = rw_session();
+        s.on_user_login().unwrap();
+        assert!(matches!(
+            s.on_user_login(),
+            Err(HsmError::UserAlreadyLoggedIn)
+        ));
+    }
+
+    #[test]
+    fn test_logout_rw_user_to_rw_public() {
+        let mut s = rw_session();
+        s.on_user_login().unwrap();
+        s.on_logout().unwrap();
+        assert_eq!(s.state, SessionState::RwPublic);
+    }
+
+    #[test]
+    fn test_logout_ro_user_to_ro_public() {
+        let mut s = ro_session();
+        s.on_user_login().unwrap();
+        s.on_logout().unwrap();
+        assert_eq!(s.state, SessionState::RoPublic);
+    }
+
+    #[test]
+    fn test_logout_so_to_rw_public() {
+        let mut s = rw_session();
+        s.on_so_login().unwrap();
+        s.on_logout().unwrap();
+        assert_eq!(s.state, SessionState::RwPublic);
+    }
+
+    #[test]
+    fn test_logout_not_logged_in_rejected() {
+        let mut s = rw_session();
+        assert!(matches!(s.on_logout(), Err(HsmError::UserNotLoggedIn)));
+    }
+
+    // ── Operation state serialization tests ──
+
+    #[test]
+    fn test_digest_state_serialize_deserialize() {
+        let hmac_key = [0xABu8; 32];
+        let op = ActiveOperation::Digest {
+            mechanism: CKM_SHA256,
+            hasher: None,
+            accumulated_input: Zeroizing::new(b"test data".to_vec()),
+        };
+        let blob = op.serialize_state(&hmac_key).unwrap();
+        let (op_type, mechanism, _key_handle, _param, data) =
+            ActiveOperation::deserialize_state(&blob, &hmac_key).unwrap();
+        assert_eq!(op_type, OP_TYPE_DIGEST);
+        assert_eq!(mechanism, CKM_SHA256);
+        assert_eq!(data.as_slice(), b"test data");
+    }
+
+    #[test]
+    fn test_state_hmac_integrity() {
+        let hmac_key = [0xABu8; 32];
+        let wrong_key = [0xCDu8; 32];
+        let op = ActiveOperation::Digest {
+            mechanism: CKM_SHA256,
+            hasher: None,
+            accumulated_input: Zeroizing::new(b"secret".to_vec()),
+        };
+        let blob = op.serialize_state(&hmac_key).unwrap();
+        // Wrong key should fail HMAC verification
+        assert!(ActiveOperation::deserialize_state(&blob, &wrong_key).is_err());
+    }
+
+    #[test]
+    fn test_state_truncation_rejected() {
+        let hmac_key = [0xABu8; 32];
+        let op = ActiveOperation::Digest {
+            mechanism: CKM_SHA256,
+            hasher: None,
+            accumulated_input: Zeroizing::new(b"data".to_vec()),
+        };
+        let blob = op.serialize_state(&hmac_key).unwrap();
+        // Truncate by 1 byte
+        let truncated = &blob[..blob.len() - 1];
+        assert!(ActiveOperation::deserialize_state(truncated, &hmac_key).is_err());
+    }
+
+    #[test]
+    fn test_encrypt_state_roundtrip() {
+        let hmac_key = [0x42u8; 32];
+        let op = ActiveOperation::Encrypt {
+            mechanism: CKM_AES_GCM,
+            key_handle: 99,
+            mechanism_param: Zeroizing::new(vec![1, 2, 3]),
+            data: Zeroizing::new(vec![4, 5, 6, 7]),
+            cached_object: None,
+        };
+        let blob = op.serialize_state(&hmac_key).unwrap();
+        let (op_type, mechanism, key_handle, param, data) =
+            ActiveOperation::deserialize_state(&blob, &hmac_key).unwrap();
+        assert_eq!(op_type, OP_TYPE_ENCRYPT);
+        assert_eq!(mechanism, CKM_AES_GCM);
+        assert_eq!(key_handle, 99);
+        assert_eq!(param.as_slice(), &[1, 2, 3]);
+        assert_eq!(data.as_slice(), &[4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn test_session_get_info() {
+        let s = rw_session();
+        let info = s.get_info();
+        assert_eq!(info.slot_id, 0);
+        assert_eq!(info.state, CKS_RW_PUBLIC_SESSION);
+        assert_eq!(info.device_error, 0);
     }
 }

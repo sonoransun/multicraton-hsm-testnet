@@ -130,6 +130,18 @@ impl ObjectStore {
 
         for store_key in keys {
             if let Some(data) = store.load_encrypted(&store_key, key)? {
+                // Guard against oversized serialized objects before
+                // spending CPU on deserialization.
+                const MAX_SERIALIZED_OBJECT_LEN: usize = 64 * 1024; // 64 KiB
+                if data.len() > MAX_SERIALIZED_OBJECT_LEN {
+                    tracing::warn!(
+                        "Rejecting oversized serialized object '{}': {} bytes",
+                        store_key,
+                        data.len()
+                    );
+                    continue;
+                }
+
                 // `data` is Zeroizing<Vec<u8>> — automatically zeroized on drop.
                 //
                 // KNOWN RESIDUAL RISK: serde_json internally allocates temporary

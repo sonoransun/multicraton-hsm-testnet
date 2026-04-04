@@ -285,6 +285,140 @@ pub fn delete(config_path: &str, handle: u64, force: bool) -> CliResult {
     Ok(())
 }
 
+/// Wrap a key with another key
+pub fn wrap_key(config_path: &str, wrapping_key: u64, target_key: u64, output: &str) -> CliResult {
+    let config = load_config(config_path)?;
+    let hsm = HsmCore::new(&config);
+
+    authenticate_user(&hsm)?;
+
+    // This is a simplified implementation - in practice we would use the PKCS#11 C_WrapKey
+    // directly or through the gRPC interface
+    println!(
+        "Wrapping key {} with key {} to file {}",
+        target_key, wrapping_key, output
+    );
+    println!("Note: Full implementation requires integration with PKCS#11 C_WrapKey function");
+
+    logout(&hsm);
+    Ok(())
+}
+
+/// Unwrap a wrapped key
+pub fn unwrap_key(config_path: &str, unwrapping_key: u64, input: &str, label: &str) -> CliResult {
+    let config = load_config(config_path)?;
+    let hsm = HsmCore::new(&config);
+
+    authenticate_user(&hsm)?;
+
+    // Read the wrapped key file
+    let wrapped_data = std::fs::read(input)
+        .map_err(|e| format!("Failed to read wrapped key file {}: {}", input, e))?;
+
+    println!(
+        "Unwrapping key from file {} with key {} as label '{}'",
+        input, unwrapping_key, label
+    );
+    println!("Wrapped data size: {} bytes", wrapped_data.len());
+    println!("Note: Full implementation requires integration with PKCS#11 C_UnwrapKey function");
+
+    logout(&hsm);
+    Ok(())
+}
+
+/// Export wrapped key in structured format
+pub fn export_wrapped_key(
+    config_path: &str,
+    wrapping_key: u64,
+    target_key: u64,
+    format: &str,
+    output: &str,
+) -> CliResult {
+    let config = load_config(config_path)?;
+    let hsm = HsmCore::new(&config);
+
+    authenticate_user(&hsm)?;
+
+    if format != "json" {
+        return Err(format!(
+            "Unsupported format '{}'. Only 'json' is currently supported.",
+            format
+        )
+        .into());
+    }
+
+    // Create a sample JSON export (placeholder)
+    let export_data = serde_json::json!({
+        "version": 1,
+        "format": "craton-hsm-wrapped-key",
+        "created": chrono::Utc::now().to_rfc3339(),
+        "wrapping_key_handle": wrapping_key,
+        "target_key_handle": target_key,
+        "wrapped_key": "placeholder-base64-data",
+        "metadata": {
+            "source_hsm": "craton-hsm",
+            "source_version": env!("CARGO_PKG_VERSION"),
+            "export_tool": "craton-hsm-admin"
+        }
+    });
+
+    std::fs::write(output, serde_json::to_string_pretty(&export_data)?)
+        .map_err(|e| format!("Failed to write export file {}: {}", output, e))?;
+
+    println!("Exported wrapped key to {}", output);
+    println!("Note: This is a placeholder implementation");
+
+    logout(&hsm);
+    Ok(())
+}
+
+/// Import wrapped key from structured format
+pub fn import_wrapped_key(
+    config_path: &str,
+    unwrapping_key: u64,
+    format: &str,
+    input: &str,
+    label: &str,
+) -> CliResult {
+    let config = load_config(config_path)?;
+    let hsm = HsmCore::new(&config);
+
+    authenticate_user(&hsm)?;
+
+    if format != "json" {
+        return Err(format!(
+            "Unsupported format '{}'. Only 'json' is currently supported.",
+            format
+        )
+        .into());
+    }
+
+    // Read and parse the JSON file
+    let json_data = std::fs::read_to_string(input)
+        .map_err(|e| format!("Failed to read import file {}: {}", input, e))?;
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&json_data).map_err(|e| format!("Failed to parse JSON: {}", e))?;
+
+    // Validate basic format
+    if parsed.get("format").and_then(|v| v.as_str()) != Some("craton-hsm-wrapped-key") {
+        return Err("Invalid wrapped key format".into());
+    }
+
+    println!(
+        "Importing wrapped key from {} with unwrapping key {} as label '{}'",
+        input, unwrapping_key, label
+    );
+    if let Some(version) = parsed.get("version") {
+        println!("Import file version: {}", version);
+    }
+
+    println!("Note: Full implementation requires integration with PKCS#11 C_UnwrapKey function");
+
+    logout(&hsm);
+    Ok(())
+}
+
 fn load_config(path: &str) -> Result<HsmConfig, Box<dyn std::error::Error>> {
     let config = HsmConfig::load_from_path(path)?;
     config

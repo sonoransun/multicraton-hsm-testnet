@@ -154,3 +154,81 @@ fn apply_hkdf(ikm: &[u8], info: &[u8], okm_len: usize) -> HsmResult<Vec<u8>> {
     })?;
     Ok(okm)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::keygen::{generate_ec_p256_key_pair, generate_ec_p384_key_pair};
+
+    #[test]
+    fn test_ecdh_p256_produces_key_material() {
+        // ECDH + HKDF with party-specific info means the two sides derive
+        // different keys (by design: info includes our_pubkey || peer_pubkey
+        // in different order). Verify each side produces valid key material.
+        let (priv_a, _pub_a) = generate_ec_p256_key_pair().unwrap();
+        let (_priv_b, pub_b) = generate_ec_p256_key_pair().unwrap();
+
+        let secret = ecdh_p256(priv_a.as_bytes(), &pub_b, None).unwrap();
+        assert_eq!(secret.len(), 32); // default okm_len for P-256
+                                      // Key material should not be all zeros
+        assert!(!secret.as_bytes().iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_ecdh_p384_produces_key_material() {
+        let (priv_a, _pub_a) = generate_ec_p384_key_pair().unwrap();
+        let (_priv_b, pub_b) = generate_ec_p384_key_pair().unwrap();
+
+        let secret = ecdh_p384(priv_a.as_bytes(), &pub_b, None).unwrap();
+        assert_eq!(secret.len(), 48); // default okm_len for P-384
+        assert!(!secret.as_bytes().iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_ecdh_deterministic() {
+        // Same inputs must produce same output
+        let (priv_a, _pub_a) = generate_ec_p256_key_pair().unwrap();
+        let (_priv_b, pub_b) = generate_ec_p256_key_pair().unwrap();
+
+        let secret_1 = ecdh_p256(priv_a.as_bytes(), &pub_b, Some(32)).unwrap();
+        let secret_2 = ecdh_p256(priv_a.as_bytes(), &pub_b, Some(32)).unwrap();
+
+        assert_eq!(secret_1.as_bytes(), secret_2.as_bytes());
+    }
+
+    #[test]
+    fn test_ecdh_different_okm_lengths() {
+        let (priv_a, _pub_a) = generate_ec_p256_key_pair().unwrap();
+        let (_priv_b, pub_b) = generate_ec_p256_key_pair().unwrap();
+
+        // okm_len=16 (AES-128), 24 (AES-192), 32 (AES-256) all work
+        let s16 = ecdh_p256(priv_a.as_bytes(), &pub_b, Some(16)).unwrap();
+        assert_eq!(s16.len(), 16);
+
+        let s24 = ecdh_p256(priv_a.as_bytes(), &pub_b, Some(24)).unwrap();
+        assert_eq!(s24.len(), 24);
+
+        let s32 = ecdh_p256(priv_a.as_bytes(), &pub_b, Some(32)).unwrap();
+        assert_eq!(s32.len(), 32);
+
+        // Different lengths must produce different keys (not just truncations,
+        // because okm_len is included in the HKDF info string)
+        assert_ne!(s16.as_bytes(), &s32.as_bytes()[..16]);
+    }
+
+    #[test]
+    fn test_ecdh_invalid_private_key() {
+        let garbage_private = vec![0xFFu8; 32];
+        let (_priv_b, pub_b) = generate_ec_p256_key_pair().unwrap();
+        let result = ecdh_p256(&garbage_private, &pub_b, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ecdh_invalid_peer_public_key() {
+        let (priv_a, _pub_a) = generate_ec_p256_key_pair().unwrap();
+        let garbage_public = vec![0xFFu8; 65];
+        let result = ecdh_p256(priv_a.as_bytes(), &garbage_public, None);
+        assert!(result.is_err());
+    }
+}

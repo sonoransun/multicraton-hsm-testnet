@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use craton_hsm::config::config::HsmConfig;
 use craton_hsm::core::HsmCore;
+#[cfg(feature = "observability")]
+use craton_hsm::metrics::server::{MetricsServer, MetricsServerConfig};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tonic::transport::Server;
@@ -84,6 +86,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize HsmCore
     let hsm = Arc::new(HsmCore::new(&hsm_config));
+
+    // Start metrics server if enabled (requires observability feature)
+    #[cfg(feature = "observability")]
+    if full_config.daemon.metrics.enabled {
+        match full_config.daemon.metrics.bind_address.parse() {
+            Ok(bind_addr) => {
+                let metrics_config = MetricsServerConfig {
+                    bind_address: bind_addr,
+                    enabled: true,
+                };
+
+                let metrics_server = MetricsServer::new(metrics_config, hsm.metrics().clone());
+
+                tokio::spawn(async move {
+                    if let Err(e) = metrics_server.start().await {
+                        tracing::error!("Failed to start metrics server: {}", e);
+                    }
+                });
+
+                tracing::info!("Metrics server started on {}", bind_addr);
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Invalid metrics bind address '{}': {} -- metrics disabled",
+                    full_config.daemon.metrics.bind_address,
+                    e
+                );
+            }
+        }
+    }
 
     let service = server::HsmServiceImpl::new(
         hsm,

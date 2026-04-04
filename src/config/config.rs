@@ -43,6 +43,8 @@ pub struct HsmConfig {
     pub audit: AuditConfig,
     #[serde(default)]
     pub algorithms: AlgorithmConfig,
+    #[serde(default)]
+    pub metrics: MetricsConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -123,6 +125,25 @@ pub struct AlgorithmConfig {
     pub fips_approved_only: bool,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct MetricsConfig {
+    /// Whether to enable the Prometheus metrics HTTP server
+    #[serde(default)]
+    pub enabled: bool,
+    /// Bind address for the metrics HTTP server (default: 127.0.0.1:9090)
+    #[serde(default = "default_metrics_bind")]
+    pub bind_address: String,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind_address: default_metrics_bind(),
+        }
+    }
+}
+
 impl Default for HsmConfig {
     fn default() -> Self {
         Self {
@@ -130,6 +151,7 @@ impl Default for HsmConfig {
             security: SecurityConfig::default(),
             audit: AuditConfig::default(),
             algorithms: AlgorithmConfig::default(),
+            metrics: MetricsConfig::default(),
         }
     }
 }
@@ -222,6 +244,10 @@ fn default_slot_count() -> usize {
 }
 fn default_serial_number() -> String {
     "0000000000000001".to_string()
+}
+
+fn default_metrics_bind() -> String {
+    "127.0.0.1:9090".to_string()
 }
 
 impl HsmConfig {
@@ -706,5 +732,89 @@ impl HsmConfig {
             tracing::error!("Configuration validation failed: {}", msg);
             Err(HsmError::ConfigError(msg))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_validates() {
+        let config = HsmConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_pin_min_below_floor() {
+        let mut config = HsmConfig::default();
+        config.security.pin_min_length = 3;
+        let err = config.validate().unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("pin_min_length"));
+    }
+
+    #[test]
+    fn test_pin_max_below_min() {
+        let mut config = HsmConfig::default();
+        config.security.pin_min_length = 8;
+        config.security.pin_max_length = 4;
+        let err = config.validate().unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("pin_max_length"));
+    }
+
+    #[test]
+    fn test_pbkdf2_below_minimum() {
+        let mut config = HsmConfig::default();
+        config.security.pbkdf2_iterations = 1_000;
+        let err = config.validate().unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("pbkdf2_iterations"));
+    }
+
+    #[test]
+    fn test_pbkdf2_above_maximum() {
+        let mut config = HsmConfig::default();
+        config.security.pbkdf2_iterations = 100_000_000;
+        let err = config.validate().unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("pbkdf2_iterations"));
+    }
+
+    #[test]
+    fn test_max_failed_logins_bounds() {
+        // Below minimum
+        let mut config = HsmConfig::default();
+        config.security.max_failed_logins = 1;
+        let err = config.validate().unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("max_failed_logins"));
+
+        // Above maximum
+        let mut config = HsmConfig::default();
+        config.security.max_failed_logins = 200;
+        let err = config.validate().unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("max_failed_logins"));
+
+        // At minimum boundary (should pass)
+        let mut config = HsmConfig::default();
+        config.security.max_failed_logins = 3;
+        assert!(config.validate().is_ok());
+
+        // At maximum boundary (should pass)
+        let mut config = HsmConfig::default();
+        config.security.max_failed_logins = 100;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_slot_count_zero() {
+        let mut config = HsmConfig::default();
+        config.token.slot_count = 0;
+        let err = config.validate().unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("slot_count"));
     }
 }

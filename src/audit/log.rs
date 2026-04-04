@@ -120,6 +120,16 @@ pub enum AuditOperation {
         result_count: u32,
     },
     GetAttributeValue,
+    ExportWrappedKey {
+        wrapping_key_handle: u64,
+        key_to_export_handle: u64,
+        format: String,
+    },
+    ImportWrappedKey {
+        unwrapping_key_handle: u64,
+        imported_key_handle: u64,
+        format: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,7 +206,7 @@ pub struct AuditLog {
 
 impl Default for AuditLog {
     fn default() -> Self {
-        Self::new()
+        Self::new().expect("failed to spawn audit worker thread")
     }
 }
 
@@ -330,7 +340,7 @@ impl AuditLog {
         receiver: std::sync::mpsc::Receiver<AuditCommand>,
         initial_hash: [u8; 32],
         initial_timestamp: u64,
-    ) -> std::thread::JoinHandle<()> {
+    ) -> std::io::Result<std::thread::JoinHandle<()>> {
         std::thread::Builder::new()
             .name("audit-worker".to_string())
             .spawn(move || {
@@ -440,6 +450,10 @@ impl AuditLog {
                         if s.entries.len() > MAX_IN_MEMORY_ENTRIES {
                             let excess = s.entries.len() - MAX_IN_MEMORY_ENTRIES;
                             s.entries.drain(..excess);
+                            tracing::warn!(
+                                "Audit log: drained {} oldest in-memory entries (disk log preserved)",
+                                excess
+                            );
                         }
                     }
                 }
@@ -500,10 +514,9 @@ impl AuditLog {
                     }
                 }
             })
-            .expect("failed to spawn audit worker thread")
     }
 
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, crate::error::HsmError> {
         let state = Arc::new(RwLock::new(AuditLogState {
             entries: Vec::new(),
             last_hash: [0u8; 32],
@@ -520,15 +533,19 @@ impl AuditLog {
             receiver,
             [0u8; 32],
             0,
-        );
+        )
+        .map_err(|e| {
+            tracing::error!("Failed to spawn audit worker: {}", e);
+            crate::error::HsmError::GeneralError
+        })?;
 
-        Self {
+        Ok(Self {
             state,
             log_path: None,
             sender: Some(sender),
             tamper_flag,
             worker: Some(worker),
-        }
+        })
     }
 
     /// Create an audit log with disk persistence enabled.
@@ -577,7 +594,11 @@ impl AuditLog {
             receiver,
             recovered_hash,
             0,
-        );
+        )
+        .map_err(|e| {
+            tracing::error!("Failed to spawn audit worker: {}", e);
+            crate::error::HsmError::GeneralError
+        })?;
 
         Ok(Self {
             state,
@@ -1052,5 +1073,7 @@ fn format_operation_name(op: &AuditOperation) -> &'static str {
         AuditOperation::DeriveKey { .. } => "DeriveKey",
         AuditOperation::FindObjects { .. } => "FindObjects",
         AuditOperation::GetAttributeValue => "GetAttributeValue",
+        AuditOperation::ExportWrappedKey { .. } => "ExportWrappedKey",
+        AuditOperation::ImportWrappedKey { .. } => "ImportWrappedKey",
     }
 }

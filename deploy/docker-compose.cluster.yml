@@ -1,0 +1,96 @@
+# deploy/docker-compose.cluster.yml
+# 3-node Craton HSM cluster for testing
+#
+# Prerequisites:
+#   1. Build the image: docker build -t craton-hsm:latest -f deploy/Dockerfile ..
+#   2. Generate test certs: ./gen-test-certs.sh
+#
+# Usage:
+#   docker compose -f docker-compose.cluster.yml up -d
+#   docker compose -f docker-compose.cluster.yml logs -f
+#   docker compose -f docker-compose.cluster.yml down -v
+
+services:
+  node1:
+    image: craton-hsm:latest
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: craton-hsm-node1
+    ports:
+      - "5696:5696"
+    volumes:
+      - node1-data:/data
+      - ./cluster-configs/node1.toml:/etc/craton_hsm/craton_hsm.toml:ro
+      - ./test-certs:/etc/craton-hsm/tls:ro
+    networks:
+      - hsm-cluster
+    environment:
+      RUST_LOG: info
+    working_dir: /data
+    healthcheck:
+      test: ["/usr/local/bin/grpc_health_probe", "-addr=:5696"]
+      interval: 20s
+      timeout: 3s
+      start_period: 15s
+      retries: 3
+    restart: unless-stopped
+
+  node2:
+    image: craton-hsm:latest
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: craton-hsm-node2
+    ports:
+      - "5697:5696"
+    volumes:
+      - node2-data:/data
+      - ./cluster-configs/node2.toml:/etc/craton_hsm/craton_hsm.toml:ro
+      - ./test-certs:/etc/craton-hsm/tls:ro
+    networks:
+      - hsm-cluster
+    environment:
+      RUST_LOG: info
+    working_dir: /data
+    healthcheck:
+      test: ["/usr/local/bin/grpc_health_probe", "-addr=:5696"]
+      interval: 20s
+      timeout: 3s
+      start_period: 15s
+      retries: 3
+    restart: unless-stopped
+
+  node3:
+    image: craton-hsm:latest
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: craton-hsm-node3
+    ports:
+      - "5698:5696"
+    volumes:
+      - node3-data:/data
+      - ./cluster-configs/node3.toml:/etc/craton_hsm/craton_hsm.toml:ro
+      - ./test-certs:/etc/craton-hsm/tls:ro
+    networks:
+      - hsm-cluster
+    environment:
+      RUST_LOG: info
+    working_dir: /data
+    healthcheck:
+      test: ["/usr/local/bin/grpc_health_probe", "-addr=:5696"]
+      interval: 20s
+      timeout: 3s
+      start_period: 15s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+
+networks:
+  hsm-cluster:
+    driver: bridge

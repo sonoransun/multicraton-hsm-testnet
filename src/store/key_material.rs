@@ -120,3 +120,56 @@ impl<'de> Deserialize<'de> for RawKeyMaterial {
         Ok(RawKeyMaterial::new(bytes))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_creates_correct_length() {
+        let km = RawKeyMaterial::new(vec![0x42; 32]);
+        assert_eq!(km.len(), 32);
+        assert_eq!(km.as_bytes(), &[0x42; 32]);
+    }
+
+    #[test]
+    fn test_debug_redacts() {
+        let km = RawKeyMaterial::new(vec![0xFF; 16]);
+        let debug = format!("{:?}", km);
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("255")); // should not contain raw byte values
+        assert!(!debug.contains("0xff"));
+    }
+
+    #[test]
+    fn test_clone_produces_independent_copy() {
+        let km = RawKeyMaterial::new(vec![1, 2, 3, 4]);
+        let cloned = km.clone();
+        assert_eq!(km.as_bytes(), cloned.as_bytes());
+        assert_eq!(km.len(), cloned.len());
+    }
+
+    #[test]
+    fn test_is_empty() {
+        assert!(RawKeyMaterial::new(vec![]).is_empty());
+        assert!(!RawKeyMaterial::new(vec![1]).is_empty());
+    }
+
+    #[test]
+    fn test_serialization_roundtrip() {
+        let original = RawKeyMaterial::new(vec![10, 20, 30, 40, 50]);
+        let serialized = serde_json::to_vec(&original).unwrap();
+        let deserialized: RawKeyMaterial = serde_json::from_slice(&serialized).unwrap();
+        assert_eq!(original.as_bytes(), deserialized.as_bytes());
+    }
+
+    #[test]
+    fn test_excess_capacity_handled() {
+        let mut data = Vec::with_capacity(1024);
+        data.extend_from_slice(&[0xAB; 32]);
+        assert!(data.capacity() > data.len());
+        let km = RawKeyMaterial::new(data);
+        assert_eq!(km.len(), 32);
+        assert_eq!(km.as_bytes(), &[0xAB; 32]);
+    }
+}

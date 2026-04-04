@@ -1,21 +1,455 @@
-/target
-/fuzz/target
-/fuzz/corpus
-/fuzz/artifacts
+# =============================================================================
+# Craton HSM — .gitignore
+# =============================================================================
+# Rules are ordered: Rust build → project runtime data → secrets/keys →
+# tooling caches → OS/IDE noise.  Each section lists the rationale so
+# reviewers understand why a pattern exists.
+#
+# Reminder: files already tracked by git are NOT untracked by .gitignore.
+# Use `git rm --cached <file>` to stop tracking a previously committed file.
+# =============================================================================
+
+# =============================================================================
+# Rust — build artefacts and caches
+# =============================================================================
+
+# Cargo build output (debug, release, bench, doc, incremental state)
+/target/
+**/target/
+
+# Fuzz artefacts — corpus is auto-generated; artifacts are crash reproducers.
+# fuzz/Cargo.toml and fuzz/Cargo.lock ARE tracked for reproducible fuzzing.
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+
+# Rust editor backup and patch artefacts
+*.rs.bk
+*.orig
+*.rej
+
+# LLVM coverage instrumentation output (cargo-llvm-cov / cargo-tarpaulin)
+*.profraw
+*.profdata
+default.profraw
+lcov.info
+tarpaulin-report.html
+tarpaulin-report.json
+
+# Miri (undefined-behaviour checker) scratch directory
+/.miri/
+
+# NOTE on Cargo.lock ──────────────────────────────────────────────────────────
+# This workspace contains binary crates (craton-hsm-daemon, craton-hsm-admin).
+# Best practice is to COMMIT Cargo.lock for binary workspaces so CI builds are
+# reproducible.  The entry below is intentionally absent — Cargo.lock is tracked.
+# If you want library-only behaviour, uncomment the line below and run
+# `git rm --cached Cargo.lock`.
+# /Cargo.lock
+
+# =============================================================================
+# Craton HSM — runtime data (generated at first run; never source-controlled)
+# =============================================================================
+
+# Token object stores (redb databases written by the HSM at runtime)
 *.redb
 *.redb.lock
-craton_hsm_store
-craton_hsm_audit.jsonl
-rusthsm_store
-rusthsm_audit.jsonl
+*.redb-*
+craton_hsm_store/
+rusthsm_store/
+lockout_state.json
 
-# IDE / editor config
+# Audit logs (append-only JSONL written during operation)
+craton_hsm_audit.jsonl
+craton_hsm_audit.jsonl.*
+rusthsm_audit.jsonl
+rusthsm_audit.log
+
+# =============================================================================
+# Craton HSM — configuration overrides (local and environment-specific)
+# =============================================================================
+
+# Production/staging config overlays must not be committed accidentally.
+# The canonical craton_hsm.toml IS tracked.  Overlay files are not.
+craton_hsm.local.toml
+craton_hsm.dev.toml
+craton_hsm.test.toml
+craton_hsm.staging.toml
+craton_hsm.production.toml
+*.hsm.toml
+
+# =============================================================================
+# Security — key material, certificates, secrets  (CRITICAL: never commit)
+# =============================================================================
+
+# X.509 / PEM / PKCS artefacts
+*.pem
+*.key
+*.crt
+*.csr
+*.cer
+*.der
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.truststore
+
+# Local key directories (the scripts/ generate-* output lands here)
+keys/
+certs/
+secrets/
+private/
+
+# Generated test certificates for cluster testing
+deploy/test-certs/
+
+# SSH keys
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+# Note: *.pub is NOT globally ignored — it is too broad and would hide legitimate
+# public-key files in test vectors. Specific public key file names are listed above.
+
+# GPG / PGP material
+*.gpg
+*.asc
+.gnupg/
+
+# Environment variable files
+.env
+.env.*
+*.env
+# Keep .env.example tracked — it documents required variables.
+!.env.example
+
+# Local settings overrides
+*.local.*
+settings.local.*
+config.local.*
+
+# Claude Code local permission settings (project-level settings.json IS tracked;
+# settings.local.json holds per-developer permission overrides).
+.claude/settings.local.json
+
+# =============================================================================
+# TPM / Confidential Computing artefacts
+# =============================================================================
+
+# Software TPM simulator state (swtpm, IBM TPM 2.0 reference impl)
+tpm.state
+tpm2.state
+nvchip
+volatile
+tpm-state/
+swtpm-state/
+
+# Attestation report caches (raw binary blobs from /dev/tdx_guest, /dev/sev-guest)
+*.tdreport
+*.quote
+*.snp_report
+*.nitro_doc
+
+# =============================================================================
+# WASM plugins (operator-supplied; not part of the source tree)
+# =============================================================================
+
+# Compiled WASM plugin binaries (loaded at runtime via the plugin engine)
+# Exception: checked-in test fixtures in tests/ are tracked.
+*.wasm
+!tests/**/*.wasm
+!fuzz/**/*.wasm
+
+# Wasmtime compilation cache (written by the Cranelift JIT)
+.wasmtime/
+
+# =============================================================================
+# Kreya (gRPC testing tool)
+# =============================================================================
+
+# Environment files MAY contain API endpoints, auth tokens, or Bearer headers.
+kreya/*.krenv
+kreya/**/*.krenv
+# The project file and directory preferences are safe to track.
+# kreya/*.krproj  ← tracked
+# kreya/*.krpref  ← tracked
+
+# =============================================================================
+# Node.js (used only for docs/markdown-pdf toolchain)
+# =============================================================================
+
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm/
+.yarn-integrity
+# package-lock.json and yarn.lock: commit these if docs builds must be
+# reproducible in CI; omit otherwise.
+package-lock.json
+yarn.lock
+bun.lockb
+
+# =============================================================================
+# Python (ad-hoc scripting / tooling only)
+# =============================================================================
+
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+.venv/
+env/
+.env/
+pip-log.txt
+
+# =============================================================================
+# Documentation build output
+# =============================================================================
+
+/docs/build/
+/docs/_build/
+/docs/dist/
+site/
+.doctrees/
+
+# Generated PDF exports (built from markdown; not source)
+docs/**/*.pdf
+*.pdf
+
+# =============================================================================
+# Test and coverage artefacts
+# =============================================================================
+
+/test-results/
+/test-output/
+junit.xml
+*.tap
+.pytest_cache/
+.tox/
+.cache/
+
+# Code coverage report directories
+/coverage/
+htmlcov/
+.nyc_output/
+*.gcov
+*.lcov
+coverage.xml
+
+# cargo-criterion benchmark output (results tracked separately if desired)
+criterion/
+/bench/results/
+
+# =============================================================================
+# Profiling and tracing artefacts
+# =============================================================================
+
+*.prof
+*.trace
+callgrind.out.*
+cachegrind.out.*
+massif.out.*
+perf.data
+perf.data.old
+
+# Flamegraph SVG output — note: only the specific output file, NOT all SVGs.
+# Diagram assets in docs/ are tracked.
+flamegraph.svg
+perf*.svg
+inferno*.svg
+
+# =============================================================================
+# Logs and temporary files
+# =============================================================================
+
+*.log
+*.err
+logs/
+log/
+tmp/
+temp/
+.tmp/
+.temp/
+
+# Audit / debug log patterns (runtime output, not source)
+audit_*.log
+debug_*.log
+trace_*.log
+pkcs11_spy_*.log
+
+# =============================================================================
+# Compiled binary / library output (outside target/)
+# =============================================================================
+
+# Object files and static archives (cross-compile output, ad-hoc builds)
+*.o
+*.a
+
+# Note: *.so / *.dylib / *.dll are intentionally NOT globally ignored.
+# The library outputs in target/ are already excluded by /target/ above.
+# Globally ignoring these suffixes would hide legitimately tracked native
+# library fixtures in tests/ or benchmark data.
+
+# =============================================================================
+# Archive / compressed files
+# =============================================================================
+
+*.zip
+*.tar
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tar.zst
+*.7z
+*.rar
+
+# =============================================================================
+# Database files (other than *.redb listed above)
+# =============================================================================
+
+*.db
+*.sqlite
+*.sqlite3
+
+# =============================================================================
+# Dependency / vendor directories
+# =============================================================================
+
+# Cargo registry and git fetch caches (stored in $CARGO_HOME, not the repo)
+# Note: .cargo/config.toml IS tracked if it exists — only caches are excluded.
+.cargo/registry/
+.cargo/git/
+.cargo-cache/
+
+# Vendored third-party source trees
+vendor/
+vendors/
+third_party/
+3rdparty/
+external/
+deps/
+dependencies/
+
+# =============================================================================
+# Container and cloud tooling
+# =============================================================================
+
+# docker-compose local overrides contain environment-specific secrets.
+# Note: deploy/Dockerfile and deploy/.dockerignore ARE tracked.
+docker-compose.override.yml
+docker-compose.local.yml
+.docker/
+
+# Kubernetes credentials
+*.kubeconfig
+kubeconfig
+.kube/
+
+# Terraform state and provider cache
+terraform.tfstate
+terraform.tfstate.backup
+terraform.tfstate.d/
+.terraform/
+.terraform.lock.hcl
+
+# Cloud provider credential caches (never commit)
+.aws/
+.gcp/
+.azure/
+
+# =============================================================================
+# Operating system generated files
+# =============================================================================
+
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+.AppleDouble
+.LSOverride
+.DocumentRevisions-V100
+.fseventsd
+.TemporaryItems
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+Icon?
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Linux
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# =============================================================================
+# IDE and editor files
+# =============================================================================
+
+# JetBrains (CLion, IntelliJ, RustRover)
 .idea/
-.vscode/
+*.iws
+*.iml
+*.ipr
+.idea_modules/
+cmake-build-*/
+
+# Visual Studio Code
+# Note: .vscode/settings.json is often team-shared — exclude only personal overrides.
+.vscode/*.code-snippets
+.history/
+*.code-workspace
+
+# Vim / Neovim
 *.swp
 *.swo
-*~
+.netrwhist
+Session.vim
+.viminfo
+.nviminfo
+tags
 
-# Node.js tooling (used for doc PDF generation only)
-node_modules/
-bun.lock
+# Emacs
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.projectile
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# =============================================================================
+# Miscellaneous
+# =============================================================================
+
+# Backup files (editors and patch tools)
+*.bak
+*~
+*.orig
+
+# Core dumps
+core
+core.[0-9]*
+vgcore.*
+*.core
+
+# Network packet captures
+*.pcap
+*.pcapng
+
+# Tool version managers
+.tool-versions

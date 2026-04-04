@@ -1,0 +1,30 @@
+# Craton HSM Daemon — Node 2 configuration
+# Used with deploy/docker-compose.cluster.yml for multi-node testing.
+
+[token]
+label = "HSM Node 2"
+storage_path = "node_store"
+
+[security]
+pin_min_length = 4
+pin_max_length = 64
+max_failed_logins = 5
+pbkdf2_iterations = 100000
+
+[audit]
+enabled = true
+log_path = "audit.jsonl"
+
+[algorithms]
+crypto_backend = "rustcrypto"
+
+[daemon]
+bind = "0.0.0.0:5696"
+tls_cert = "/etc/craton-hsm/tls/node2-server.crt"
+tls_key = "/etc/craton-hsm/tls/node2-server.key"
+tls_client_ca = "/etc/craton-hsm/tls/test-ca.crt"
+max_connections = 64
+request_timeout_secs = 30
+
+[daemon.metrics]
+enabled = false

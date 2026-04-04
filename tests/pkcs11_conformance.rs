@@ -1198,7 +1198,7 @@ fn test_config_pbkdf2_iterations_floor() {
 fn test_audit_log_chain_integrity() {
     use craton_hsm::audit::log::{AuditLog, AuditOperation, AuditResult};
 
-    let log = AuditLog::new();
+    let log = AuditLog::new().unwrap();
 
     // Record several events
     for i in 0..10 {
@@ -1225,7 +1225,7 @@ fn test_audit_log_chain_integrity() {
 fn test_audit_log_injection_prevention() {
     use craton_hsm::audit::log::{AuditLog, AuditOperation, AuditResult};
 
-    let log = AuditLog::new();
+    let log = AuditLog::new().unwrap();
 
     // Try to inject a newline and control characters into key_id
     let malicious_key = "key\n{\"injected\":true}\x00evil".to_string();
