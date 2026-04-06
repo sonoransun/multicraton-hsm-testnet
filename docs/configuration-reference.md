@@ -6,6 +6,30 @@ If the config file is not found, secure defaults are used. If the config file ex
 
 In FIPS mode (`CRATON_HSM_FIPS=1` or `--features fips`), config files are ignored and hardcoded secure defaults are used.
 
+## Configuration Resolution
+
+```mermaid
+flowchart TD
+    START["Module loads"] --> FIPS{"CRATON_HSM_FIPS=1<br/>env var set?"}
+    FIPS -->|Yes| HARD["Use hardcoded<br/>secure defaults<br/><i>config file ignored</i>"]
+    FIPS -->|No| ENV{"CRATON_HSM_CONFIG<br/>env var set?"}
+    ENV -->|Yes| LOADPATH["Load config from<br/>specified path"]
+    ENV -->|No| CWD{"craton_hsm.toml<br/>in CWD?"}
+    CWD -->|Found| PARSE["Parse TOML"]
+    CWD -->|Not found| DEFAULTS["Use built-in<br/>defaults"]
+    LOADPATH --> PARSE
+    PARSE --> VALID{"Validation<br/>passes?"}
+    VALID -->|Yes| READY(["Config ready"])
+    VALID -->|No| ERR["CKR_GENERAL_ERROR<br/><i>module refuses to start</i>"]
+
+    classDef success fill:#1a6e2e,color:#fff
+    classDef fail fill:#7a2d2d,color:#fff
+    classDef decision fill:#7a5c2d,color:#fff
+    class READY success
+    class ERR fail
+    class FIPS,ENV,CWD,VALID decision
+```
+
 ### Configuration Validation (v0.9.1)
 
 The following validation rules are enforced on load:

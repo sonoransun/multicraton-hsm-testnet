@@ -4,6 +4,36 @@
 
 The cryptographic module boundary encompasses all code that handles key material, performs cryptographic operations, or enforces security policy.
 
+```mermaid
+graph TB
+    subgraph inside ["Inside Cryptographic Boundary"]
+        direction TB
+        CORE["src/core.rs<br/><i>HsmCore</i>"]
+        CRYPTO["src/crypto/<br/><i>keygen, sign, encrypt,<br/>digest, PQC, DRBG,<br/>self-test, backends</i>"]
+        STORE["src/store/<br/><i>RawKeyMaterial,<br/>ObjectStore,<br/>EncryptedStore</i>"]
+        SESSION["src/session/<br/>src/token/<br/><i>auth, PIN, state machine</i>"]
+        ABI["src/pkcs11_abi/<br/><i>input validation,<br/>output marshalling</i>"]
+        AUDIT["src/audit/<br/><i>tamper-evident log</i>"]
+    end
+
+    subgraph outside ["Outside Boundary"]
+        direction TB
+        DAEMON["craton-hsm-daemon/<br/><i>network transport</i>"]
+        ADMINCLI["tools/craton-hsm-admin/<br/><i>management CLI</i>"]
+        SPY["tools/pkcs11-spy/<br/><i>debug tool</i>"]
+        DEPLOY["deploy/<br/><i>infrastructure</i>"]
+        BENCH["benches/<br/><i>testing only</i>"]
+    end
+
+    DAEMON -->|calls into| ABI
+    ADMINCLI -->|calls into| ABI
+
+    classDef inner fill:#2d4a7a,color:#fff
+    classDef outer fill:#e0e0e0,color:#333
+    class CORE,CRYPTO,STORE,SESSION,ABI,AUDIT inner
+    class DAEMON,ADMINCLI,SPY,DEPLOY,BENCH outer
+```
+
 ### Inside the boundary
 
 | Component | Path | Role |
@@ -77,6 +107,32 @@ The cryptographic module boundary encompasses all code that handles key material
 - 9 PQC (ML-KEM-512/768/1024, ML-DSA-44/65/87, SLH-DSA-128s/256s, Hybrid)
 
 ## Self-Test Coverage (POST) — 17 tests (integrity + 16 KATs) ✅
+
+```mermaid
+flowchart TD
+    INIT["C_Initialize called"] --> INTEG["#0 Software integrity<br/><i>HMAC-SHA256 of binary</i>"]
+    INTEG -->|pass| HASH["#1-4 Hash KATs<br/><i>SHA-256, SHA-384,<br/>SHA-512, SHA3-256</i>"]
+    INTEG -->|fail| FAIL(["POST_FAILED<br/>All ops → CKR_GENERAL_ERROR"])
+    HASH -->|pass| MAC["#5-7 HMAC KATs<br/><i>HMAC-SHA256/384/512</i>"]
+    HASH -->|fail| FAIL
+    MAC -->|pass| SYM["#8-10 AES KATs<br/><i>AES-GCM, AES-CBC, AES-CTR</i>"]
+    MAC -->|fail| FAIL
+    SYM -->|pass| ASYM["#11-12 Asymmetric KATs<br/><i>RSA-2048, ECDSA P-256</i>"]
+    SYM -->|fail| FAIL
+    ASYM -->|pass| PQC["#13-14 PQC KATs<br/><i>ML-DSA-44, ML-KEM-768</i>"]
+    ASYM -->|fail| FAIL
+    PQC -->|pass| RNG["#15-16 RNG KATs<br/><i>RNG health, HMAC_DRBG</i>"]
+    PQC -->|fail| FAIL
+    RNG -->|pass| READY(["Module Ready"])
+    RNG -->|fail| FAIL
+
+    classDef success fill:#1a6e2e,color:#fff
+    classDef fail fill:#7a2d2d,color:#fff
+    classDef test fill:#2d4a7a,color:#fff
+    class READY success
+    class FAIL fail
+    class INTEG,HASH,MAC,SYM,ASYM,PQC,RNG test
+```
 
 All P0 POST KATs have been implemented. Security audit (v0.9.1) upgraded AES-CBC/CTR from circular roundtrip tests to genuine known-answer tests with hardcoded expected ciphertexts, and added RSA PKCS#1 v1.5 KAT.
 

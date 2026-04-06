@@ -13,9 +13,11 @@ Craton HSM is a PKCS#11 v3.0-compliant Software Hardware Security Module written
 This is a Cargo workspace with the following crates:
 
 - **craton-hsm** (root): Core PKCS#11 library (`cdylib` + `rlib`)
-- **craton-hsm-daemon**: gRPC server with mutual TLS for remote HSM access
+- **craton-hsm-daemon**: gRPC server with mutual TLS for remote HSM access (requires `protoc`)
 - **tools/craton-hsm-admin**: CLI for token management, PIN operations, diagnostics
 - **tools/pkcs11-spy**: PKCS#11 spy/logging wrapper for debugging
+
+MSRV: Rust 1.75 (`rust-version` in Cargo.toml). Toolchain pinned to stable via `rust-toolchain.toml`.
 
 ## Build Commands
 
@@ -23,7 +25,7 @@ This is a Cargo workspace with the following crates:
 # Debug build (core library only)
 cargo build
 
-# Release build (core library only)
+# Release build (core library only — slow: LTO + codegen-units=1)
 cargo build --release
 
 # Full workspace (requires protoc for gRPC daemon)
@@ -39,7 +41,7 @@ Library output: `target/release/libcraton_hsm.{so,dylib,dll}` (cdylib) and rlib.
 
 ## Testing
 
-**Critical**: All tests MUST run single-threaded due to global PKCS#11 state (one `C_Initialize`/`C_Finalize` per process).
+**Critical**: All tests MUST run single-threaded by default due to global PKCS#11 state. The C ABI layer holds a single `static HSM: parking_lot::Mutex<Option<Arc<HsmCore>>>` in `src/pkcs11_abi/functions.rs` — only one `C_Initialize`/`C_Finalize` lifecycle per process.
 
 ```bash
 # Full test suite (safe default)
@@ -87,27 +89,50 @@ cargo clippy --workspace -- -D clippy::correctness -D clippy::suspicious
 cargo deny check
 ```
 
+`lib.rs` has `#![warn(missing_docs)]` — new public items need doc comments.
+
 Note: `deny.toml` ignores `RUSTSEC-2023-0071` (RSA Marvin Attack) — no fix available yet; mitigated by not exposing raw RSA decryption.
 
+### Local CI
+
+`scripts/ci-local.sh` mirrors GitHub Actions CI locally:
+
+```bash
+./scripts/ci-local.sh              # Run all jobs
+./scripts/ci-local.sh quick        # fmt + test + clippy (fastest useful check)
+./scripts/ci-local.sh test         # Build & test only
+```
+
+Also supports: `fmt`, `clippy`, `audit`, `miri`, `docs`, `coverage`, `semver`.
+
 ## Architecture
+
+### Global State and Request Flow
+
+The C ABI entrypoint is `src/pkcs11_abi/functions.rs`, which exports ~68 `#[no_mangle]` PKCS#11 functions. These all access the global `static HSM` (a `Mutex<Option<Arc<HsmCore>>>`) with a thread-local cache (`CACHED_HSM`) indexed by generation counter for fast-path access. Fork detection (`INIT_PID`) reinitializes state to prevent key material leakage in child processes.
 
 ### Core Components
 
 - **HsmCore** (`src/core.rs`): Central state manager holding `slot_manager`, `session_manager`, `object_store`, `audit_log`, `crypto_backend`, `drbg`, and `algorithm_config`. Use `new()` for defaults or `new_with_backend()` to inject an external `CryptoBackend`.
-- **pkcs11_abi/** (`src/pkcs11_abi/`): C ABI layer — `types.rs` (PKCS#11 type defs), `constants.rs` (CK_ constants), `functions.rs` (~68 `#[no_mangle]` exports). Uses `#[allow(non_camel_case_types, non_snake_case)]`.
+- **pkcs11_abi/** (`src/pkcs11_abi/`): C ABI layer — `types.rs` (PKCS#11 type defs), `constants.rs` (CK_ constants), `functions.rs` (exports). Uses `#[allow(non_camel_case_types, non_snake_case)]`.
 - **session/** (`src/session/`): `SessionManager` using `DashMap<CK_SESSION_HANDLE, Arc<RwLock<Session>>>`. Sessions track `SessionState` (RoPublic/RoUser/RwPublic/RwUser/RwSO) and `ActiveOperation` contexts. Includes thread-local caching (`tls_cache`).
 - **token/** (`src/token/`): Token/slot management, PIN lifecycle, multi-slot support.
 - **store/** (`src/store/`): Encrypted redb backend (`encrypted_store.rs`) with AES-256-GCM + PBKDF2-derived keys. `StoredObject` carries full PKCS#11 attributes and SP 800-57 key lifecycle states. Also contains `wrapped_key.rs` (import/export), `backup.rs`, `key_cache.rs`, `lockout_store.rs`.
 - **crypto/** (`src/crypto/`): Pluggable backends via `CryptoBackend` trait (`backend.rs`). Includes `sign.rs`, `encrypt.rs`, `digest.rs`, `keygen.rs`, `derive.rs`, `wrap.rs`, `drbg.rs` (SP 800-90A HMAC_DRBG), `pqc.rs` (ML-KEM/ML-DSA/SLH-DSA), `self_test.rs` (17 POST KATs), `integrity.rs`, `bls.rs`, `hybrid_kem.rs`.
 - **audit/** (`src/audit/`): Tamper-evident append-only audit log with chained SHA-256 hashes.
 - **config/** (`src/config/`): TOML-based `HsmConfig` with algorithm policy. Runtime config via `craton_hsm.toml`.
-- **cluster/** (`src/cluster/`): Raft consensus (`consensus.rs`), key replication, membership management, `ClusterTransport` with mTLS/QUIC/Noise Protocol transport.
-- **error.rs**: `HsmError` enum (64 variants) with `From<HsmError> for CK_RV` mapping to PKCS#11 return codes.
+- **cluster/** (`src/cluster/`): Raft consensus, key replication, membership management. **Requires `networking` feature flag.**
+- **error.rs**: `HsmError` enum (64 variants, intentionally no `Copy` derive) with `From<HsmError> for CK_RV` mapping to PKCS#11 return codes.
 - **metrics/** (`src/metrics/`, feature `observability`): Prometheus metrics + HTTP server.
+
+### Feature-Gated Modules
+
+- **`cluster`** module requires `networking` feature
+- **`advanced`** module compiles when any of: `advanced-all`, `fhe-compute`, `tpm-binding`, `stark-proofs`, `wasm-plugins`, `zkp`, `threshold`, `gpu-acceleration`, `ml-analytics`, `policy-engine`, `quantum-resistant`
 
 ### Crypto Backend System
 
-Two backends via the `CryptoBackend` trait:
+Two backends via the `CryptoBackend` trait (covers classical crypto only; PQC has no alternative backends):
 
 - **RustCrypto** (default, feature `rustcrypto-backend`): Pure Rust
 - **aws-lc-rs** (optional, feature `awslc-backend`): FIPS 140-3 validated
@@ -134,12 +159,12 @@ Two backends via the `CryptoBackend` trait:
 | `wrapped-keys` | — | Key import/export (JSON, PKCS#8, PKCS#12) |
 | `observability` | — | Prometheus metrics + HTTP server |
 | `enterprise` | — | `wrapped-keys` + `observability` |
+| `networking` | — | Enables `cluster` module (Raft, mTLS, transport) |
 | `blake3-hash` | — | BLAKE3 parallel tree-hashing |
 | `hybrid-kem` | — | X25519 + ML-KEM-768 dual KEM |
 | `chacha20-aead` | — | ChaCha20-Poly1305 / XChaCha20 AEAD |
 | `argon2-kdf` | — | Argon2id memory-hard KDF |
 | `bls-signatures` | — | BLS12-381 aggregatable signatures |
-| `opaque-auth` | — | OPAQUE augmented PAKE (RFC 9497) |
 | `stark-proofs` | — | STARK proofs via Winterfell |
 | `fhe-compute` | — | FHE via tfhe-rs (large build footprint) |
 | `tpm-binding` | — | TPM 2.0 via tss-esapi (requires libtss2) |
@@ -147,6 +172,8 @@ Two backends via the `CryptoBackend` trait:
 | `quic-transport` | — | QUIC cluster transport via quinn |
 | `noise-protocol` | — | Noise Protocol encrypted channels |
 | `advanced-all` | — | Most features (excludes fhe-compute, tpm-binding, quic-transport, wasm-plugins due to build size) |
+
+**Disabled features**: `opaque-auth` and `voprf-protocol` are commented out in Cargo.toml due to `curve25519-dalek` version conflicts with `opaque-ke`.
 
 ## Error Handling
 
@@ -186,7 +213,7 @@ PKCS11_SPY_OUTPUT=/tmp/pkcs11.log  # use spy library instead of main library
 # Miri (undefined behavior detection)
 cargo +nightly miri test --lib -- --test-threads=1 crypto::zeroize crypto::digest
 
-# Fuzzing
+# Fuzzing (12 fuzz targets in fuzz/fuzz_targets/)
 cargo +nightly fuzz run <target_name>
 
 # Documentation

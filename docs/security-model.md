@@ -84,23 +84,32 @@ The only `unsafe` code is in the PKCS#11 C ABI layer (`src/pkcs11_abi/functions.
 
 ### Key material lifecycle
 
-```
-Generate / Import
-       |
-       v
-  RawKeyMaterial::new(bytes)
-  |  └── mlock(ptr, len)    <-- locks pages into physical RAM
-  |  └── Debug: [REDACTED]  <-- never logs key bytes
-  |
-  |  Used via &[u8] borrow (never cloned unnecessarily)
-  |
-  v
-  Crypto operation (sign, encrypt, etc.)
-  |
-  v
-  Drop (manual impl):
-  |  1. self.0.zeroize()     <-- clears all bytes to 0x00
-  |  2. munlock(ptr, len)    <-- unlocks (now-zeroed) pages
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> Allocated: Generate / Import
+    Allocated --> Protected: RawKeyMaterial::new()
+    state Protected {
+        direction LR
+        [*] --> Locked: mlock(ptr, len)
+        Locked --> InUse: &[u8] borrow
+        InUse --> Locked: borrow released
+    }
+    Protected --> Destroyed: Drop
+    state Destroyed {
+        direction LR
+        [*] --> Zeroed: zeroize()
+        Zeroed --> Unlocked: munlock(ptr, len)
+    }
+    Protected --> Persisted: AES-256-GCM encrypt
+    Persisted --> Protected: Decrypt + mlock on load
+
+    classDef protected fill:#2d4a7a,color:#fff
+    classDef destroyed fill:#7a2d2d,color:#fff
+    classDef persisted fill:#4a2d7a,color:#fff
+    class Protected protected
+    class Destroyed destroyed
+    class Persisted persisted
 ```
 
 **Platform support**:
@@ -134,11 +143,30 @@ Default for generated keys: `PRIVATE=true, SENSITIVE=true, EXTRACTABLE=false` (m
 
 The audit log is append-only with chained SHA-256 hashes:
 
-```
-Entry[0].previous_hash = [0; 32]  (genesis)
-Entry[1].previous_hash = SHA-256(serialize(Entry[0]))
-Entry[2].previous_hash = SHA-256(serialize(Entry[1]))
-...
+```mermaid
+flowchart LR
+    E0["Entry[0]<br/>prev_hash = 0x00…00<br/><i>genesis</i>"]
+    H1["SHA-256"]
+    E1["Entry[1]<br/>prev_hash = H(E0)"]
+    H2["SHA-256"]
+    E2["Entry[2]<br/>prev_hash = H(E1)"]
+    H3["SHA-256"]
+    E3["Entry[3]<br/>prev_hash = H(E2)"]
+
+    E0 --> H1 --> E1 --> H2 --> E2 --> H3 --> E3
+
+    T["⚠ Entry[1] modified"]
+    BK["Chain broken!<br/>H(E1') ≠ E2.prev_hash"]
+
+    T -.->|tamper| E1
+    E1 -.-> BK
+
+    classDef entry fill:#2d4a7a,color:#fff
+    classDef hash fill:#e0e0e0,color:#333
+    classDef tamper fill:#7a2d2d,color:#fff
+    class E0,E1,E2,E3 entry
+    class H1,H2,H3 hash
+    class T,BK tamper
 ```
 
 Properties:

@@ -39,6 +39,40 @@ Each benchmark iteration includes the full `C_*Init` + `C_*` pair (e.g., `C_Sign
 | `pkcs11_keygen_ec_p256` | EC P-256 key pair generation | -- |
 | `pkcs11_keygen_aes_256` | AES-256 symmetric key generation | -- |
 
+### Visual Performance Comparison
+
+Signing latency through the PKCS#11 C ABI (Craton HSM, RustCrypto backend, optimized). Ed25519 and ML-DSA-44 numbers are from the direct Rust API and PQC benchmarks respectively, as these operations are not yet exposed in the ABI benchmark suite.
+
+```mermaid
+---
+config:
+    themeVariables:
+        xyChart:
+            backgroundColor: transparent
+---
+xychart-beta
+    title "Signing Latency (lower is better)"
+    x-axis ["RSA-2048", "ECDSA P-256", "Ed25519", "ML-DSA-44"]
+    y-axis "Microseconds" 0 --> 3000
+    bar [2558, 512, 44, 712]
+```
+
+Key generation latency through the PKCS#11 C ABI (Craton HSM, RustCrypto backend, optimized). Note the logarithmic-scale difference: RSA-2048 keygen is orders of magnitude slower than symmetric or EC key generation.
+
+```mermaid
+---
+config:
+    themeVariables:
+        xyChart:
+            backgroundColor: transparent
+---
+xychart-beta
+    title "Key Generation Latency"
+    x-axis ["RSA-2048", "EC P-256", "AES-256"]
+    y-axis "Microseconds" 0 --> 350000
+    bar [313600, 824, 19]
+```
+
 ---
 
 ## Phase 1: Baseline (Direct Rust API, RustCrypto)

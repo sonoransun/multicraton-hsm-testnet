@@ -543,6 +543,16 @@ pub fn aes_cbc_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> HsmResult<Vec
 /// vulnerable to padding oracle attacks if the attacker can observe whether
 /// decryption succeeded or failed. The caller MUST verify a MAC (encrypt-then-MAC)
 /// over the IV + ciphertext BEFORE calling this function.
+///
+/// # Security
+///
+/// **This function MUST be used with encrypt-then-MAC at the application layer.**
+/// Without an independent MAC verified BEFORE decryption, the caller is vulnerable
+/// to padding oracle attacks that can recover plaintext byte-by-byte.
+///
+/// The internal timing mitigation (minimum-duration floor) is **defense-in-depth
+/// only** — it is NOT a constant-time guarantee. See the module-level documentation
+/// for a full threat analysis. **AES-GCM is strongly preferred for all new uses.**
 pub fn aes_cbc_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> HsmResult<Vec<u8>> {
     use cbc::cipher::{BlockDecryptMut, KeyIvInit};
 

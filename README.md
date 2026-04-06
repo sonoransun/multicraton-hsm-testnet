@@ -19,60 +19,66 @@ Craton HSM is an enterprise cryptographic platform combining the compliance of t
 
 ```mermaid
 graph TB
-    subgraph CLIENTS["Client Applications"]
-        A1[OpenSSL / NSS]
-        A2[Java PKCS11]
-        A3[Cloud Services]
-        A4[Admin CLI]
+    subgraph CLIENTS["Clients"]
+        A1["OpenSSL / NSS / Java"]
+        A2["Cloud Services"]
+        A3["Admin CLI"]
     end
 
-    subgraph INTERFACES["Interface Layer"]
-        I1["PKCS#11 C ABI<br/>70+ Functions"]
-        I2["gRPC / mTLS<br/>30+ Methods"]
-        I3["Admin CLI<br/>Token · Key · Audit"]
+    subgraph INTERFACES["Interfaces"]
+        I1["PKCS#11 C ABI"]
+        I2["gRPC / mTLS"]
+        I3["Admin CLI"]
     end
 
-    subgraph CORE["Core HSM Engine"]
-        C1["HsmCore<br/>Central State Manager"]
-        C2["Session Manager<br/>DashMap concurrent sessions"]
-        C3["Token Manager<br/>PIN lifecycle · SP 800-57"]
-        C4["Object Store<br/>AES-256-GCM · redb"]
-        C5["Audit Log<br/>SHA-256 integrity chain"]
+    subgraph CORE["HsmCore"]
+        C1["Sessions"]
+        C2["Tokens & PIN"]
+        C3["Object Store"]
+        C4["Audit Log"]
     end
 
-    subgraph CRYPTO["Cryptographic Layer"]
+    subgraph CRYPTO["Crypto Engine"]
         direction LR
-        CL["Classical<br/>RSA · ECDSA · EdDSA · AES"]
-        PQ["Post-Quantum<br/>ML-KEM · ML-DSA · SLH-DSA"]
-        HY["Hybrid KEM<br/>X25519 + ML-KEM-768"]
-        BL["BLS12-381<br/>Aggregatable signatures"]
-        DR["HMAC_DRBG<br/>SP 800-90A"]
+        CL["Classical<br/><i>RSA · ECDSA · EdDSA · AES</i>"]
+        PQ["Post-Quantum<br/><i>ML-KEM · ML-DSA · SLH-DSA</i>"]
+        HY["Hybrid & BLS<br/><i>X25519⊕ML-KEM · BLS12-381</i>"]
+        DR["DRBG<br/><i>SP 800-90A</i>"]
     end
 
-    subgraph ADVANCED["Advanced Capabilities"]
+    subgraph ADVANCED["Advanced"]
         direction LR
-        FH["FHE<br/>tfhe-rs"]
-        TP["TPM 2.0<br/>PCR sealing"]
-        SK["STARK Proofs<br/>Winterfell"]
-        WA["WASM Plugins<br/>Wasmtime"]
-        AT["Attestation<br/>TDX · SEV-SNP · Nitro"]
+        FH["FHE · TPM 2.0"]
+        SK["STARK · WASM"]
+        AT["Attestation"]
     end
 
-    subgraph CLUSTER["Cluster Transport"]
+    subgraph CLUSTER["Transport"]
         direction LR
-        MT["mTLS 1.3"]
-        QU["QUIC<br/>quinn · 0-RTT"]
-        NO["Noise Protocol<br/>XX_25519_AESGCM"]
+        MT["mTLS"]
+        QU["QUIC"]
+        NO["Noise"]
     end
 
-    A1 & A2 --> I1
-    A3 --> I2
-    A4 --> I3
-    I1 & I2 & I3 --> C1
-    C1 --> C2 & C3 & C4 & C5
-    C1 --> CL & PQ & HY & BL & DR
-    C1 --> FH & TP & SK & WA & AT
-    C1 --> MT & QU & NO
+    A1 --> I1
+    A2 --> I2
+    A3 --> I3
+    I1 & I2 & I3 --> CORE
+    CORE --> CRYPTO
+    CORE --> ADVANCED
+    CORE --> CLUSTER
+
+    classDef client fill:#e0e0e0,color:#333
+    classDef iface fill:#7a5c2d,color:#fff
+    classDef core fill:#2d4a7a,color:#fff
+    classDef crypto fill:#1a6e2e,color:#fff
+    classDef adv fill:#4a2d7a,color:#fff
+    class A1,A2,A3 client
+    class I1,I2,I3 iface
+    class C1,C2,C3,C4 core
+    class CL,PQ,HY,DR crypto
+    class FH,SK,AT adv
+    class MT,QU,NO iface
 ```
 
 ---
@@ -83,37 +89,47 @@ graph TB
 
 ```mermaid
 graph LR
-    subgraph CLASS["Classical  (128-256 bit security)"]
-        RSA["RSA<br/>2048 · 3072 · 4096"]
-        EC["ECDSA<br/>P-256 · P-384 · K-256"]
-        ED["EdDSA<br/>Ed25519 · Ed448"]
-        AES["AES<br/>CBC · CTR · GCM · KW · SIV"]
-        SHA["Hash<br/>SHA-1/2/3 · BLAKE3 · HMAC"]
-        KDF["KDF<br/>PBKDF2 · Argon2id · HKDF"]
+    subgraph CLASS["Classical  (128–256 bit)"]
+        direction TB
+        RSA["RSA  2048 · 3072 · 4096"]
+        EC["ECDSA  P-256 · P-384 · K-256"]
+        ED["EdDSA  Ed25519 · Ed448"]
+        AES["AES  CBC · CTR · GCM · KW"]
+        SHA["Hash  SHA-1/2/3 · BLAKE3 · HMAC"]
+        KDF["KDF  PBKDF2 · Argon2id · HKDF"]
     end
 
-    subgraph PQC["Post-Quantum  (NIST FIPS 203-205)"]
-        KEM["ML-KEM<br/>512 · 768 · 1024"]
-        DSA["ML-DSA<br/>44 · 65 · 87"]
-        SLH["SLH-DSA<br/>SHA2-128s · SHA2-256s"]
+    subgraph PQC["Post-Quantum  (FIPS 203-205)"]
+        direction TB
+        KEM["ML-KEM  512 · 768 · 1024"]
+        DSA["ML-DSA  44 · 65 · 87"]
+        SLH["SLH-DSA  SHA2-128s · 256s"]
     end
 
-    subgraph HYBRID["Hybrid  (classical + PQ)"]
-        HK["Hybrid KEM<br/>X25519 ⊕ ML-KEM-768<br/>HKDF-combined"]
+    subgraph HYBRID["Hybrid  (classical ⊕ PQ)"]
+        direction TB
+        HK["Hybrid KEM<br/>X25519 ⊕ ML-KEM-768"]
         HS["Hybrid Sign<br/>ECDSA-P256 ⊕ ML-DSA-65"]
     end
 
-    subgraph AGG["Aggregatable"]
-        BLS["BLS12-381<br/>Sign · Verify<br/>Aggregate n→1<br/>Batch verify"]
-    end
-
-    subgraph OPRF["Oblivious"]
-        VF["VOPRF<br/>RFC 9497<br/>Rate-limited tokens"]
+    subgraph SPECIAL["Specialized"]
+        direction TB
+        BLS["BLS12-381<br/>Aggregatable signatures"]
+        VF["VOPRF  RFC 9497"]
     end
 
     CLASS --> HYBRID
-    PQC  --> HYBRID
-    CLASS --> AGG
+    PQC --> HYBRID
+    CLASS --> SPECIAL
+
+    classDef classical fill:#2d4a7a,color:#fff
+    classDef pqc fill:#4a2d7a,color:#fff
+    classDef hybrid fill:#1a6e2e,color:#fff
+    classDef special fill:#7a5c2d,color:#fff
+    class RSA,EC,ED,AES,SHA,KDF classical
+    class KEM,DSA,SLH pqc
+    class HK,HS hybrid
+    class BLS,VF special
 ```
 
 ### Hybrid KEM encapsulation flow
@@ -143,23 +159,24 @@ sequenceDiagram
 
 ```mermaid
 graph LR
-    subgraph SIGNERS["n Signers"]
-        SK1["sk₁ · sign(msg)"] --> SIG1["sig₁  [96 B]"]
-        SK2["sk₂ · sign(msg)"] --> SIG2["sig₂  [96 B]"]
-        SKN["skₙ · sign(msg)"] --> SIGN["sigₙ  [96 B]"]
-    end
+    SIGN["n Signers<br/><i>sk₁…skₙ sign(msg)</i>"]
+    SIGS["n Signatures<br/><i>[96 B each]</i>"]
+    PKS["n Public Keys<br/><i>[48 B each]</i>"]
 
-    SIG1 & SIG2 & SIGN --> AGG["aggregate_signatures()<br/>AggregateSignature"]
-    PK1["pk₁  [48 B]"] & PK2["pk₂  [48 B]"] & PKN["pkₙ  [48 B]"] --> AGGPK["aggregate_public_keys()<br/>AggregatePublicKey"]
+    SIGN --> SIGS
+    SIGS --> AGG["aggregate()<br/><i>→ 1 AggSig [96 B]</i>"]
+    PKS --> AGGPK["aggregate()<br/><i>→ 1 AggPK [48 B]</i>"]
 
-    AGG & AGGPK --> VFY{"verify_multisig(msg)<br/>O(1) pairings"}
-    VFY -->|"✓"| OK["Valid — all n<br/>parties approved"]
-    VFY -->|"✗"| FAIL["Invalid"]
+    AGG & AGGPK --> VFY{"verify(msg)<br/><i>O(1) pairings</i>"}
+    VFY -->|"valid"| OK(["All n signers approved"])
+    VFY -->|"invalid"| FAIL(["Rejected"])
 
-    style AGG fill:#2d4a7a,color:#fff
-    style AGGPK fill:#2d4a7a,color:#fff
-    style OK fill:#1a6e2e,color:#fff
-    style FAIL fill:#7a2d2d,color:#fff
+    classDef agg fill:#2d4a7a,color:#fff
+    classDef ok fill:#1a6e2e,color:#fff
+    classDef fail fill:#7a2d2d,color:#fff
+    class AGG,AGGPK agg
+    class OK ok
+    class FAIL fail
 ```
 
 ---
@@ -230,21 +247,28 @@ Prove correctness of HSM operations **without revealing secret material** — tr
 ```mermaid
 flowchart LR
     subgraph PROVE["Prover  (HSM, offline)"]
-        T["Build execution trace<br/>N steps × 2 columns"] --> A["Define AIR constraints<br/>transition + boundary"]
-        A --> P["winterfell::prove()<br/>Blake3_256 FRI"]
-        P --> PR["CounterStarkProof<br/>~10 KB for N=64"]
+        T["Execution trace<br/><i>N steps × 2 columns</i>"]
+        A["AIR constraints<br/><i>transition + boundary</i>"]
+        LDE["Low-degree extension<br/><i>evaluation domain</i>"]
+        FRI["FRI commitment<br/><i>log(N) rounds</i>"]
+        PR["Proof<br/><i>~10 KB for N=64</i>"]
+        T --> A --> LDE --> FRI --> PR
     end
 
-    subgraph VERIFY["Verifier  (auditor, ~1 ms)"]
-        PR2["CounterStarkProof"] --> V["winterfell::verify()<br/>no secret knowledge needed"]
-        V -->|"✓"| VALID["Counter advanced<br/>from A to B correctly"]
-        V -->|"✗"| INV["Proof invalid"]
+    subgraph VERIFY["Verifier  (~1 ms)"]
+        V["winterfell::verify()<br/><i>no secret knowledge</i>"]
+        V -->|valid| OK(["Counter correct"])
+        V -->|invalid| FAIL(["Proof rejected"])
     end
 
-    PR --> PR2
+    PR --> V
 
-    style VALID fill:#1a6e2e,color:#fff
-    style INV fill:#7a2d2d,color:#fff
+    classDef prove fill:#2d4a7a,color:#fff
+    classDef ok fill:#1a6e2e,color:#fff
+    classDef fail fill:#7a2d2d,color:#fff
+    class T,A,LDE,FRI,PR prove
+    class OK ok
+    class FAIL fail
 ```
 
 **Properties:** Post-quantum security (hash-based, not pairing-based). Proof size sub-linear in trace length. Verification ~1 ms regardless of computation size.
@@ -255,24 +279,26 @@ flowchart LR
 flowchart TD
     subgraph DETECT["Platform Detection"]
         D{"/dev/tdx_guest?<br/>/dev/sev-guest?<br/>/dev/nsm?"}
-        D -->|TDX| TDX["Intel TDX<br/>TD Quote via QE"]
-        D -->|SEV-SNP| SNP["AMD SEV-SNP<br/>Attestation report"]
-        D -->|Nitro| NITRO["AWS Nitro<br/>COSE_Sign1 doc"]
-        D -->|none| SW["Software fallback<br/>P-256 self-signed"]
+        D -->|TDX| TDX["Intel TDX<br/><i>TD Quote via QE</i>"]
+        D -->|SEV-SNP| SNP["AMD SEV-SNP<br/><i>attestation report</i>"]
+        D -->|Nitro| NITRO["AWS Nitro<br/><i>COSE_Sign1</i>"]
+        D -->|none| SW["Software fallback<br/><i>P-256 self-signed</i>"]
     end
 
-    subgraph TOKEN["AttestationToken (EAT-compatible)"]
-        F["platform · issued_at · nonce<br/>measurement · report · signature"]
-    end
+    TDX & SNP & NITRO & SW --> TOKEN["AttestationToken<br/><i>platform · nonce · measurement · signature</i>"]
 
-    subgraph VERIFY["Remote Verifier"]
-        V1["Verify nonce matches challenge"]
-        V2["Verify signature against platform CA"]
-        V3["Check measurement against known-good policy"]
-    end
+    TOKEN --> V1["Verify nonce freshness"]
+    V1 --> V2["Verify signature vs platform CA"]
+    V2 --> V3{"Measurement matches<br/>known-good policy?"}
+    V3 -->|match| TRUST(["Node trusted<br/>allow key operations"])
+    V3 -->|mismatch| REJECT(["Attestation failed<br/>reject node"])
 
-    TDX & SNP & NITRO & SW --> F
-    F --> V1 --> V2 --> V3
+    classDef ok fill:#1a6e2e,color:#fff
+    classDef fail fill:#7a2d2d,color:#fff
+    classDef platform fill:#2d4a7a,color:#fff
+    class TRUST ok
+    class REJECT fail
+    class TDX,SNP,NITRO,SW,TOKEN platform
 ```
 
 ### WebAssembly Plugin System
@@ -309,27 +335,34 @@ flowchart LR
 
 ```mermaid
 graph TB
-    subgraph TRANSPORT["ClusterTransport  (select per deployment)"]
+    subgraph TRANSPORT["ClusterTransport — select per deployment"]
         direction LR
 
-        subgraph MTLS["MutualTls  (default)"]
+        subgraph MTLS["mTLS  (default)"]
             MT1["TLS 1.3 + client certs"]
             MT2["Standard PKI integration"]
             MT3["Widest tooling support"]
         end
 
-        subgraph QUIC["Quic  (quic-transport feature)"]
+        subgraph QUIC["QUIC  (quic-transport)"]
             QU1["0-RTT session resumption"]
-            QU2["Independent stream multiplexing<br/>no HOL blocking between Raft msgs"]
-            QU3["Connection migration<br/>survives IP change / NAT rebind"]
+            QU2["Stream multiplexing<br/>no HOL blocking"]
+            QU3["Connection migration<br/>survives NAT rebind"]
         end
 
-        subgraph NOISE["Noise  (noise-protocol feature)"]
-            NO1["Noise_XX_25519_AESGCM_SHA256"]
-            NO2["No PKI / certificate authority"]
-            NO3["Static X25519 keys per node<br/>authenticated peer map"]
+        subgraph NOISE["Noise  (noise-protocol)"]
+            NO1["Noise_XX_25519_AESGCM"]
+            NO2["No PKI needed"]
+            NO3["Static X25519 key pairs"]
         end
     end
+
+    MTLS ~~~ N1["Use when: existing PKI,<br/>enterprise compliance"]
+    QUIC ~~~ N2["Use when: high throughput,<br/>mobile/NAT, multiplexed"]
+    NOISE ~~~ N3["Use when: peer-to-peer,<br/>no CA, minimal deps"]
+
+    classDef note fill:#7a5c2d,color:#fff
+    class N1,N2,N3 note
 ```
 
 ### Raft cluster with multi-transport
@@ -356,7 +389,17 @@ sequenceDiagram
 
     L-->>C: Operation committed + result
 
-    Note over L,F2: Heartbeats flow on a separate QUIC stream<br/>concurrently with replication traffic
+    Note over L,F2: Heartbeats on separate QUIC stream
+
+    alt Leader failure
+        Note over L: Leader crashes or network partition
+        F1->>F1: Election timeout expires
+        F1->>F2: RequestVote
+        F2-->>F1: VoteGranted
+        Note over F1: F1 becomes new Leader
+        C->>LB: Retry operation
+        LB->>F1: Route to new leader
+    end
 ```
 
 ### Key replication and wrapped-key transfer
@@ -374,9 +417,20 @@ sequenceDiagram
 
     Note over HSM1,HSM2: Import on target
     KS-->>HSM2: Load export file
-    HSM2->>HSM2: Validate format, age, serial binding
-    HSM2->>HSM2: UnwrapKey(kek, wrapped_data) → key handle
-    HSM2-->>HSM1: Acknowledge (cluster replicated)
+
+    rect rgb(122, 92, 45)
+        Note over HSM2: Validation checks
+        HSM2->>HSM2: Verify JSON schema version
+        HSM2->>HSM2: Check export timestamp < max_age
+        HSM2->>HSM2: Verify serial_number matches target
+    end
+
+    alt Validation passes
+        HSM2->>HSM2: UnwrapKey(kek, wrapped_data) → key handle
+        HSM2-->>HSM1: Acknowledge (cluster replicated)
+    else Validation fails
+        HSM2->>HSM2: Reject import, log audit event
+    end
 ```
 
 ---
@@ -386,61 +440,75 @@ sequenceDiagram
 ### Defence-in-depth layers
 
 ```mermaid
-graph TB
-    subgraph L1["Layer 1 — Application"]
-        A1["OPAQUE PAKE auth<br/>zero-knowledge PIN"]
-        A2["Cedar / OPA policy engine<br/>RBAC + ABAC"]
-        A3["Exponential backoff<br/>lockout on failed auth"]
+flowchart TD
+    ATK1(["External attacker"])
+    ATK1 --> L1
+
+    subgraph L1["Layer 1 — Authentication"]
+        A1["OPAQUE PAKE · PIN lockout · RBAC policy"]
     end
+    L1 -->|"no credentials"| STOP1["Blocked: unauthorized"]
+    L1 -->|"authenticated"| L2
 
     subgraph L2["Layer 2 — Transport"]
-        B1["mTLS 1.3 / QUIC / Noise<br/>mutual authentication"]
-        B2["gRPC token validation"]
-        B3["Token-bucket rate limiting<br/>per-node"]
+        B1["mTLS 1.3 / QUIC / Noise · rate limiting"]
     end
+    L2 -->|"invalid cert"| STOP2["Blocked: TLS rejected"]
+    L2 -->|"encrypted channel"| L3
 
-    subgraph L3["Layer 3 — Cryptography"]
-        C1["SP 800-90A HMAC_DRBG<br/>prediction resistance"]
-        C2["17 Power-On Self-Tests<br/>integrity + 16 KATs"]
-        C3["Constant-time operations<br/>side-channel resistance"]
+    subgraph L3["Layer 3 — Crypto Integrity"]
+        C1["17 POST KATs · HMAC_DRBG · constant-time ops"]
     end
+    L3 -->|"tampered binary"| STOP3["Blocked: POST failed"]
+    L3 -->|"verified"| L4
 
-    subgraph L4["Layer 4 — Storage"]
-        D1["AES-256-GCM object store<br/>PBKDF2 / Argon2id keys"]
-        D2["mlock / VirtualLock<br/>prevent swap of key material"]
-        D3["ZeroizeOnDrop on all<br/>sensitive types"]
+    subgraph L4["Layer 4 — Key Storage"]
+        D1["AES-256-GCM store · mlock · ZeroizeOnDrop"]
     end
+    L4 -->|"swap/remanence"| STOP4["Blocked: memory locked"]
+    L4 -->|"key loaded"| L5
 
-    subgraph L5["Layer 5 — Hardware / Platform"]
-        E1["TPM 2.0 PCR sealing<br/>bound to firmware state"]
-        E2["TDX / SEV-SNP attestation<br/>confidential VM verified"]
-        E3["Tamper-evident audit log<br/>chained SHA-256"]
+    subgraph L5["Layer 5 — Platform"]
+        E1["TPM PCR seal · TEE attestation · audit chain"]
     end
+    L5 --> SAFE(["Operation complete<br/>Audit logged"])
 
-    L1 --> L2 --> L3 --> L4 --> L5
+    classDef stop fill:#7a2d2d,color:#fff
+    classDef safe fill:#1a6e2e,color:#fff
+    classDef layer fill:#2d4a7a,color:#fff
+    class STOP1,STOP2,STOP3,STOP4 stop
+    class SAFE safe
+    class A1,B1,C1,D1,E1 layer
 ```
 
 ### Zero-knowledge proof subsystem
 
 ```mermaid
-graph LR
-    subgraph ZKP["ZKP Module  (zkp feature)"]
-        direction TB
-        BP["Bulletproof range proofs<br/>Prove value in [0, 2^64)"]
-        G16["Groth16 proving<br/>BN254 pairing curve"]
-        AUTH["Authentication proof<br/>Prove PIN knowledge<br/>without revealing PIN"]
-        OWN["Key ownership proof<br/>Prove sk ↔ pk binding<br/>without exposing sk"]
-        MEM["Merkle membership proof<br/>Prove key is in approved set"]
+flowchart TD
+    Q{"What do you<br/>need to prove?"}
+
+    Q -->|"Range proof<br/>(value in bounds)"| BP["Bulletproofs<br/><i>small proofs, no setup</i>"]
+    Q -->|"Complex statement<br/>(trusted setup OK)"| G16["Groth16<br/><i>constant-size proofs, fast verify</i>"]
+    Q -->|"Scalable integrity<br/>(post-quantum)"| STARK["STARK<br/><i>transparent, hash-based</i>"]
+
+    BP --> USE1["Audit: prove operation<br/>without revealing data"]
+    G16 --> USE1
+    STARK --> USE2["Compliance: prove algorithm<br/>policy was followed"]
+
+    subgraph APPS["Proof Applications"]
+        AUTH["PIN knowledge proof<br/><i>without revealing PIN</i>"]
+        OWN["Key ownership proof<br/><i>sk ↔ pk binding</i>"]
+        MEM["Merkle membership<br/><i>key in approved set</i>"]
     end
 
-    subgraph STARK_BOX["STARK Module  (stark-proofs feature)"]
-        ST1["Counter integrity proof<br/>monotonic advance N steps"]
-        ST2["Post-quantum secure<br/>hash-based (Blake3)"]
-        ST3["Transparent<br/>no trusted setup"]
-    end
+    USE1 --> APPS
 
-    ZKP -->|"small proofs<br/>fast generation"| USE1["Audit: prove operation<br/>without revealing data"]
-    STARK_BOX -->|"scalable<br/>fast verification"| USE2["Compliance: prove algorithm<br/>policy was followed"]
+    classDef zkp fill:#4a2d7a,color:#fff
+    classDef stark fill:#2d4a7a,color:#fff
+    classDef app fill:#1a6e2e,color:#fff
+    class BP,G16 zkp
+    class STARK stark
+    class AUTH,OWN,MEM app
 ```
 
 ---
@@ -567,56 +635,50 @@ pkcs11-tool --module $PKCS11_MODULE_PATH --list-slots
 ```mermaid
 graph TB
     subgraph WS["Cargo Workspace"]
-        subgraph CORE_LIB["craton-hsm  (core library)"]
-            direction TB
-            ABI_M["pkcs11_abi/<br/>types · constants · 70+ fns"]
-            CORE_M["core.rs<br/>HsmCore"]
-            SESSION_M["session/<br/>DashMap sessions"]
-            TOKEN_M["token/<br/>PIN · lockout · SP 800-57"]
-            STORE_M["store/<br/>encrypted redb · key cache<br/>wrapped-key I/O · backup"]
-            CRYPTO_M["crypto/<br/>classical · PQC · hybrid KEM<br/>BLS · DRBG · self-tests<br/>backends (RustCrypto · AWS-LC)"]
-            AUDIT_M["audit/<br/>chained SHA-256 log"]
-            CLUSTER_M["cluster/<br/>Raft · replication<br/>mTLS · QUIC · Noise"]
-            ADV_M["advanced/<br/>FHE · TPM · STARK<br/>WASM plugins · attestation<br/>ZKP · threshold · policy"]
-            METRICS_M["metrics/<br/>Prometheus · Axum HTTP"]
+        subgraph LIB["craton-hsm  (cdylib + rlib)"]
+            ABI["PKCS#11 ABI"]
+            CORE["HsmCore"]
+            SESS_TOK["Sessions & Tokens"]
+            STORE["Object Store"]
+            CRYPTO["Crypto Engine"]
+            AUDIT["Audit Log"]
         end
-
-        DAEMON["craton-hsm-daemon<br/>gRPC server · mTLS"]
-        ADMIN["tools/craton-hsm-admin<br/>CLI"]
-        SPY["tools/pkcs11-spy<br/>debug wrapper"]
+        DAEMON["craton-hsm-daemon"]
+        ADMIN["craton-hsm-admin"]
+        SPY["pkcs11-spy"]
     end
 
-    ABI_M & DAEMON & ADMIN --> CORE_M
-    SPY --> ABI_M
-    CORE_M --> SESSION_M & TOKEN_M & STORE_M & CRYPTO_M
-    CORE_M --> AUDIT_M & CLUSTER_M & ADV_M & METRICS_M
+    ABI & DAEMON & ADMIN --> CORE
+    SPY --> ABI
+    CORE --> SESS_TOK & STORE & CRYPTO & AUDIT
+
+    classDef core fill:#2d4a7a,color:#fff
+    classDef tool fill:#e0e0e0,color:#333
+    class ABI,CORE,SESS_TOK,STORE,CRYPTO,AUDIT core
+    class DAEMON,ADMIN,SPY tool
 ```
 
 ### Data flow for a typical operation
 
 ```mermaid
 flowchart LR
-    subgraph IN["Entry"]
-        CA["C_Sign() call"]
-    end
-    subgraph SESS["Session layer"]
-        SV["Session validation<br/>handle → Session"]
-        AUTH["Auth state check<br/>UserLoggedIn?"]
-    end
-    subgraph OPS["Operation"]
-        DISP["HsmCore dispatch"]
-        KEY["Load key from<br/>ObjectStore"]
-        SIGN["Crypto backend<br/>sign()"]
-    end
-    subgraph OUT["Output + side effects"]
-        RET["Return signature bytes<br/>CKR_OK"]
-        AUDIT["Append to audit log<br/>HMAC chain"]
-        METRICS["Increment Prometheus<br/>counters"]
-    end
+    CA["C_Sign()"] --> SV["Validate<br/>session"]
+    SV -->|invalid| E1["CKR_SESSION_<br/>HANDLE_INVALID"]
+    SV -->|ok| AUTH["Check<br/>auth"]
+    AUTH -->|not logged in| E2["CKR_USER_<br/>NOT_LOGGED_IN"]
+    AUTH -->|ok| KEY["Load key"]
+    KEY -->|not found| E3["CKR_KEY_<br/>HANDLE_INVALID"]
+    KEY -->|ok| SIGN["Crypto<br/>sign()"]
+    SIGN --> RET(["Signature bytes<br/>CKR_OK"])
+    SIGN --> AUDIT["Audit log"]
+    SIGN --> MET["Metrics"]
 
-    CA --> SV --> AUTH --> DISP --> KEY --> SIGN --> RET
-    SIGN --> AUDIT
-    SIGN --> METRICS
+    classDef err fill:#7a2d2d,color:#fff
+    classDef ok fill:#1a6e2e,color:#fff
+    classDef step fill:#2d4a7a,color:#fff
+    class E1,E2,E3 err
+    class RET ok
+    class CA,SV,AUTH,KEY,SIGN,AUDIT,MET step
 ```
 
 ---

@@ -6,107 +6,81 @@ Craton HSM is a software HSM (Hardware Security Module emulator) that exposes a 
 
 ## High-Level Module Diagram
 
-```
-                     ┌──────────────────────────────────────┐
-                     │        Consumer Applications          │
-                     │  (OpenSSL, Java SunPKCS11, ssh-agent) │
-                     └──────┬──────────┬──────────┬─────────┘
-                            │          │          │
-               dlopen       │   gRPC   │   CLI    │
-               C ABI        │   /TLS   │          │
-                            ▼          ▼          ▼
-                ┌───────────────┐ ┌─────────┐ ┌──────────────┐
-                │  pkcs11_abi/  │ │craton_hsm- │ │craton-hsm-admin │
-                │  functions.rs │ │ daemon  │ │              │
-                │  70+ exports  │ │  tonic  │ │  clap CLI    │
-                └──────┬────────┘ └────┬────┘ └──────┬───────┘
-                       │               │             │
-                       └───────────────┼─────────────┘
-                                       ▼
-                             ┌───────────────────┐
-                             │     HsmCore        │
-                             │   (src/core.rs)    │
-                             │                    │
-                             │  SlotManager       │
-                             │  SessionManager    │
-                             │  ObjectStore       │
-                             │  AuditLog          │
-                             └────────┬───────────┘
-                                      │
-              ┌──────────┬────────────┼────────────┬──────────┐
-              ▼          ▼            ▼            ▼          ▼
-        ┌──────────┐ ┌────────┐ ┌──────────┐ ┌─────────┐ ┌───────┐
-        │ session/ │ │ token/ │ │  store/  │ │ crypto/ │ │audit/ │
-        │          │ │        │ │          │ │         │ │       │
-        │ Session  │ │ Token  │ │ Object   │ │ keygen  │ │Append-│
-        │  state   │ │  PIN   │ │ Store    │ │ sign    │ │ only  │
-        │ machine  │ │  auth  │ │ Encrypt  │ │ encrypt │ │chained│
-        │ DashMap  │ │PBKDF2  │ │ Store    │ │ digest  │ │SHA-256│
-        │          │ │lockout │ │  (redb)  │ │ pqc     │ │       │
-        └──────────┘ └────────┘ └──────────┘ │ wrap    │ └───────┘
-                                              │ derive  │
-                                              │self_test│
-                                              │  drbg   │
-                                              │ mlock   │
-                                              └─────────┘
+```mermaid
+graph TB
+    subgraph consumers ["Consumer Applications"]
+        OSSl["OpenSSL / NSS"]
+        Java["Java SunPKCS11"]
+        SSH["ssh-agent"]
+    end
+
+    subgraph interfaces ["Interface Layer"]
+        ABI["pkcs11_abi/<br/>70+ C exports<br/><i>dlopen</i>"]
+        DAEMON["craton-hsm-daemon<br/><i>gRPC / mTLS</i>"]
+        ADMIN["craton-hsm-admin<br/><i>clap CLI</i>"]
+    end
+
+    subgraph hsmcore ["HsmCore  (src/core.rs)"]
+        direction TB
+        SM["SessionManager"]
+        SL["SlotManager"]
+        OS["ObjectStore"]
+        AL["AuditLog"]
+    end
+
+    subgraph modules ["Internal Modules"]
+        SESSION["session/<br/><i>state machine, DashMap</i>"]
+        TOKEN["token/<br/><i>PIN auth, PBKDF2, lockout</i>"]
+        STORE["store/<br/><i>EncryptedStore, redb</i>"]
+        CRYPTO["crypto/<br/><i>keygen, sign, encrypt,<br/>digest, PQC, DRBG,<br/>self-test, mlock</i>"]
+        AUDIT["audit/<br/><i>append-only,<br/>chained SHA-256</i>"]
+    end
+
+    OSSl & Java & SSH --> ABI
+    OSSl & Java --> DAEMON
+    ADMIN --> ADMIN
+
+    ABI & DAEMON & ADMIN --> hsmcore
+    hsmcore --> SESSION & TOKEN & STORE & CRYPTO & AUDIT
+
+    classDef iface fill:#e0e0e0,color:#333
+    classDef core fill:#2d4a7a,color:#fff
+    classDef mod fill:#1a6e2e,color:#fff
+    class ABI,DAEMON,ADMIN iface
+    class SM,SL,OS,AL core
+    class SESSION,TOKEN,STORE,CRYPTO,AUDIT mod
 ```
 
 ## Source Layout
 
-```
-craton_hsm/
-├── Cargo.toml                 Workspace root + core library package
-├── src/
-│   ├── lib.rs                 Crate root (module declarations)
-│   ├── core.rs                HsmCore: central state shared by all consumers
-│   ├── error.rs               HsmError enum with CK_RV mapping
-│   ├── pkcs11_abi/
-│   │   ├── types.rs           CK_* type aliases and C struct definitions
-│   │   ├── constants.rs       CKR_*, CKM_*, CKO_*, CKA_* constants
-│   │   └── functions.rs       70+ #[no_mangle] extern "C" exports
-│   ├── session/
-│   │   ├── session.rs         Session state machine (5 states)
-│   │   ├── manager.rs         SessionManager (DashMap-backed)
-│   │   └── handle.rs          Handle allocation
-│   ├── token/
-│   │   ├── token.rs           Token: PIN hashing, login, lockout
-│   │   └── slot.rs            SlotManager (multi-slot via HashMap)
-│   ├── store/
-│   │   ├── object.rs          StoredObject with attribute model
-│   │   ├── attributes.rs      ObjectStore: in-memory object storage
-│   │   ├── encrypted_store.rs Persistent store (redb + AES-256-GCM)
-│   │   ├── backup.rs          Encrypted backup/restore (AES-256-GCM + PBKDF2)
-│   │   └── key_material.rs    RawKeyMaterial (ZeroizeOnDrop wrapper)
-│   ├── crypto/
-│   │   ├── keygen.rs          RSA, EC, Ed25519, AES key generation
-│   │   ├── sign.rs            RSA PKCS#1/PSS, ECDSA, Ed25519, HMAC
-│   │   ├── encrypt.rs         AES-GCM, AES-CBC, AES-CTR, RSA-OAEP
-│   │   ├── digest.rs          SHA-1, SHA-2, SHA-3 family
-│   │   ├── derive.rs          ECDH key derivation (P-256, P-384)
-│   │   ├── wrap.rs            AES Key Wrap (RFC 3394)
-│   │   ├── pqc.rs             ML-DSA, ML-KEM, SLH-DSA, hybrid
-│   │   ├── mechanisms.rs      Mechanism dispatch tables
-│   │   ├── drbg.rs            SP 800-90A HMAC_DRBG (prediction resistance)
-│   │   ├── self_test.rs       FIPS 140-3 POST (17 tests: integrity + 16 KATs)
-│   │   ├── mlock.rs           Memory locking (Unix mlock / Windows VirtualLock)
-│   │   ├── backend.rs         CryptoBackend trait (26 methods)
-│   │   ├── rustcrypto_backend.rs  Default RustCrypto implementation
-│   │   └── awslc_backend.rs   Optional aws-lc-rs FIPS backend
-│   ├── config/
-│   │   └── config.rs          TOML configuration with defaults
-│   └── audit/
-│       └── log.rs             Append-only log with chained SHA-256
-├── craton-hsm-daemon/            gRPC daemon (tonic + rustls)
-├── tools/
-│   ├── craton-hsm-admin/         Admin CLI (clap)
-│   └── pkcs11-spy/            PKCS#11 interceptor (cdylib)
-├── deploy/
-│   ├── Dockerfile             Multi-stage distroless build
-│   └── helm/craton_hsm/          Kubernetes Helm chart
-├── benches/
-│   └── crypto_bench.rs        Criterion benchmarks
-├── tests/                     617+ integration tests
-└── docs/                      Documentation
+```mermaid
+graph LR
+    ROOT["craton_hsm/"] --> SRC["src/"]
+    ROOT --> DAEMON["craton-hsm-daemon/<br/><i>gRPC daemon (tonic + rustls)</i>"]
+    ROOT --> TOOLS["tools/"]
+    ROOT --> DEPLOY["deploy/<br/><i>Dockerfile, Helm chart</i>"]
+    ROOT --> BENCH["benches/<br/><i>Criterion benchmarks</i>"]
+    ROOT --> TESTS["tests/<br/><i>617+ integration tests</i>"]
+    ROOT --> DOCS["docs/"]
+
+    SRC --> LIB["lib.rs — crate root"]
+    SRC --> CORE["core.rs — HsmCore"]
+    SRC --> ERR["error.rs — HsmError ↔ CK_RV"]
+    SRC --> ABI["pkcs11_abi/<br/><i>types, constants, 70+ exports</i>"]
+    SRC --> SESS["session/<br/><i>state machine, DashMap manager</i>"]
+    SRC --> TOK["token/<br/><i>PIN hashing, lockout, slots</i>"]
+    SRC --> STORE["store/<br/><i>objects, encrypted redb,<br/>backup, key_material</i>"]
+    SRC --> CRYPTO["crypto/<br/><i>keygen, sign, encrypt, digest,<br/>derive, wrap, PQC, DRBG,<br/>self_test, mlock, backends</i>"]
+    SRC --> CFG["config/<br/><i>TOML config + defaults</i>"]
+    SRC --> AUDIT["audit/<br/><i>append-only chained SHA-256</i>"]
+
+    TOOLS --> ADMINCLI["craton-hsm-admin/<br/><i>Admin CLI (clap)</i>"]
+    TOOLS --> SPY["pkcs11-spy/<br/><i>PKCS#11 interceptor</i>"]
+
+    classDef dir fill:#2d4a7a,color:#fff
+    classDef file fill:#e0e0e0,color:#333
+    class ROOT,SRC,TOOLS,DEPLOY,BENCH,TESTS,DOCS,DAEMON dir
+    class LIB,CORE,ERR,ABI,SESS,TOK,STORE,CRYPTO,CFG,AUDIT,ADMINCLI,SPY file
 ```
 
 ## Core Components
@@ -143,24 +117,32 @@ All `unsafe` code is confined to this module and follows four documented pattern
 
 Five PKCS#11-compliant session states with enforced transitions:
 
-```
-                    C_OpenSession (RO)
-                         │
-                    ┌────▼────┐     C_Login(USER)     ┌─────────┐
-                    │RoPublic │ ──────────────────────►│ RoUser  │
-                    └─────────┘                        └─────────┘
+```mermaid
+stateDiagram-v2
+    [*] --> RoPublic : C_OpenSession(RO)
+    [*] --> RwPublic : C_OpenSession(RW)
 
-                    C_OpenSession (RW)
-                         │
-                    ┌────▼────┐     C_Login(USER)     ┌─────────┐
-                    │RwPublic │ ──────────────────────►│ RwUser  │
-                    └─────────┘                        └─────────┘
-                         │
-                         │ C_Login(SO)
-                         ▼
-                    ┌─────────┐
-                    │  RwSO   │
-                    └─────────┘
+    RoPublic --> RoUser : C_Login(USER)
+    RoUser --> RoPublic : C_Logout
+
+    RwPublic --> RwUser : C_Login(USER)
+    RwUser --> RwPublic : C_Logout
+
+    RwPublic --> RwSO : C_Login(SO)
+    RwSO --> RwPublic : C_Logout
+
+    RoPublic --> [*] : C_CloseSession
+    RoUser --> [*] : C_CloseSession
+    RwPublic --> [*] : C_CloseSession
+    RwUser --> [*] : C_CloseSession
+    RwSO --> [*] : C_CloseSession
+
+    classDef public fill:#e0e0e0,color:#333
+    classDef authed fill:#1a6e2e,color:#fff
+    classDef so fill:#7a5c2d,color:#fff
+    class RoPublic,RwPublic public
+    class RoUser,RwUser authed
+    class RwSO so
 ```
 
 Sessions are stored in a `DashMap<CK_SESSION_HANDLE, Session>` for lock-free concurrent access.
@@ -260,33 +242,53 @@ If any test fails, `POST_FAILED` is set and all subsequent operations return `CK
 
 ## Data Flow: Sign Operation
 
-```
-Application
-  │
-  ▼  C_SignInit(hSession, pMechanism, hKey)
-  ├── catch_unwind boundary
-  ├── validate session exists and is logged in
-  ├── look up key object in ObjectStore
-  ├── verify CKA_SIGN == true on key
-  ├── store (mechanism, key_handle) in Session.active_operation
-  └── return CKR_OK
+```mermaid
+flowchart TD
+    APP1["Application calls<br/>C_SignInit(hSession, pMechanism, hKey)"]
+    CU1["catch_unwind boundary"]
+    VS["Validate session exists"]
+    VL["Check login state"]
+    LK["Look up key in ObjectStore"]
+    VCS["Verify CKA_SIGN == true"]
+    STORE["Store (mechanism, key_handle)<br/>in Session.active_operation"]
+    OK1(["CKR_OK"])
 
-Application
-  │
-  ▼  C_Sign(hSession, pData, ulDataLen, pSignature, pulSignatureLen)
-  ├── catch_unwind boundary
-  ├── retrieve active Sign operation from Session
-  ├── load key material from ObjectStore
-  ├── dispatch to crypto::sign based on mechanism type
-  │     ├── CKM_RSA_PKCS → rsa_pkcs1v15_sign()
-  │     ├── CKM_ECDSA    → ecdsa_p256_sign() / ecdsa_p384_sign()
-  │     ├── CKM_EDDSA    → ed25519_sign()
-  │     ├── CKM_ML_DSA_* → ml_dsa_sign()
-  │     └── ...
-  ├── write signature bytes to pSignature buffer
-  ├── record to AuditLog (synchronous)
-  ├── clear Session.active_operation
-  └── return CKR_OK
+    APP1 --> CU1 --> VS
+    VS -->|not found| E1["CKR_SESSION_HANDLE_INVALID"]
+    VS -->|found| VL
+    VL -->|not logged in| E2["CKR_USER_NOT_LOGGED_IN"]
+    VL -->|authenticated| LK
+    LK -->|not found| E3["CKR_KEY_HANDLE_INVALID"]
+    LK -->|found| VCS
+    VCS -->|denied| E4["CKR_KEY_FUNCTION_NOT_PERMITTED"]
+    VCS -->|permitted| STORE --> OK1
+
+    APP2["Application calls<br/>C_Sign(hSession, pData, pSignature)"]
+    CU2["catch_unwind boundary"]
+    ROP["Retrieve active Sign operation"]
+    LOAD["Load key material"]
+    DISP["Dispatch by mechanism"]
+    RSA["CKM_RSA_PKCS<br/>→ rsa_pkcs1v15_sign()"]
+    EC["CKM_ECDSA<br/>→ ecdsa_sign()"]
+    ED["CKM_EDDSA<br/>→ ed25519_sign()"]
+    PQC["CKM_ML_DSA_*<br/>→ ml_dsa_sign()"]
+    WRITE["Write signature to buffer"]
+    ADTL["Record to AuditLog<br/><i>synchronous</i>"]
+    CLR["Clear active_operation"]
+    OK2(["CKR_OK"])
+
+    APP2 --> CU2 --> ROP
+    ROP -->|no active op| E5["CKR_OPERATION_NOT_INITIALIZED"]
+    ROP -->|active| LOAD --> DISP
+    DISP --> RSA & EC & ED & PQC
+    RSA & EC & ED & PQC --> WRITE --> ADTL --> CLR --> OK2
+
+    classDef error fill:#7a2d2d,color:#fff
+    classDef success fill:#1a6e2e,color:#fff
+    classDef crypto fill:#2d4a7a,color:#fff
+    class E1,E2,E3,E4,E5 error
+    class OK1,OK2 success
+    class RSA,EC,ED,PQC crypto
 ```
 
 ## Concurrency Model
@@ -302,47 +304,58 @@ Application
 
 ### In-process (shared library)
 
-```
-┌──────────────────────────┐
-│  Application Process     │
-│                          │
-│  app code                │
-│    │  dlopen             │
-│    ▼                     │
-│  libcraton_hsm.so/.dll     │
-│  (PKCS#11 C ABI)        │
-└──────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph process ["Application Process"]
+        APP["App Code"] -->|dlopen| LIB["libcraton_hsm.so/.dll<br/><i>PKCS#11 C ABI</i>"]
+    end
+
+    classDef lib fill:#2d4a7a,color:#fff
+    class LIB lib
 ```
 
 ### Network daemon (standalone or sidecar)
 
-```
-┌──────────────┐   gRPC/TLS   ┌──────────────────┐
-│  Application │ ────────────► │  craton-hsm-daemon  │
-│              │   port 5696   │                  │
-└──────────────┘               │  ┌────────────┐  │
-                               │  │  HsmCore   │  │
-                               │  └────────────┘  │
-                               └──────────────────┘
+```mermaid
+flowchart LR
+    subgraph client ["Client Host"]
+        APP["Application"]
+    end
+    subgraph server ["Daemon Host"]
+        DAEMON["craton-hsm-daemon<br/><i>port 5696</i>"]
+        CORE["HsmCore"]
+        DAEMON --> CORE
+    end
+
+    APP -->|"gRPC / mTLS"| DAEMON
+
+    classDef core fill:#2d4a7a,color:#fff
+    class CORE core
 ```
 
 ### Kubernetes sidecar
 
-```
-┌─ Pod ──────────────────────────────────┐
-│                                        │
-│  ┌──────────────┐  ┌────────────────┐  │
-│  │  App         │  │  craton_hsm       │  │
-│  │  Container   │  │  Container     │  │
-│  │              │  │                │  │
-│  │  gRPC ───────┼──┤  :5696        │  │
-│  │  localhost   │  │  craton_hsm-     │  │
-│  │              │  │  daemon       │  │
-│  └──────────────┘  └────────────────┘  │
-│                                        │
-│  ConfigMap: craton_hsm.toml               │
-│  Secret: TLS cert/key                  │
-└────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph pod ["Kubernetes Pod"]
+        subgraph appC ["App Container"]
+            APP["Application"]
+        end
+        subgraph hsmC ["HSM Sidecar Container"]
+            DAEMON["craton-hsm-daemon<br/><i>:5696</i>"]
+        end
+        APP -->|"gRPC localhost"| DAEMON
+
+        CM["ConfigMap: craton_hsm.toml"]
+        SEC["Secret: TLS cert/key"]
+        CM -.-> DAEMON
+        SEC -.-> DAEMON
+    end
+
+    classDef config fill:#7a5c2d,color:#fff
+    classDef hsm fill:#2d4a7a,color:#fff
+    class CM,SEC config
+    class DAEMON hsm
 ```
 
 ---

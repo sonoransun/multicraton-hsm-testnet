@@ -273,6 +273,7 @@ hex = "0.4"
 criterion = { version = "0.8", features = ["html_reports"] }
 libloading = "0.9"
 wat = "1.0"
+libc = "0.2"
 # craton_hsm-awslc: only available with the enterprise repo; see docs/fips-mode-guide.md
 # To run FIPS backend tests locally, clone craton_hsm-enterprise alongside this repo and uncomment:
 # craton_hsm-awslc = { path = "../craton_hsm-enterprise/craton_hsm-awslc" }

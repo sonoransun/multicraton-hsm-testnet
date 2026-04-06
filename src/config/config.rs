@@ -7,7 +7,10 @@ use std::path::PathBuf;
 use crate::error::HsmError;
 
 /// Minimum acceptable PBKDF2 iteration count to resist brute-force attacks.
-const MIN_PBKDF2_ITERATIONS: u32 = 100_000;
+/// OWASP 2024 recommends >= 1,000,000 for PBKDF2-HMAC-SHA256; we use 600,000
+/// as an absolute floor so that existing tokens with pre-2024 iteration counts
+/// can still be opened, while nudging new deployments to the default of 1M.
+const MIN_PBKDF2_ITERATIONS: u32 = 600_000;
 /// Maximum acceptable PBKDF2 iteration count to prevent algorithmic DoS via
 /// config-planted extreme values.
 const MAX_PBKDF2_ITERATIONS: u32 = 10_000_000;
@@ -225,7 +228,7 @@ fn default_max_failed() -> u32 {
     10
 }
 fn default_pbkdf2_iterations() -> u32 {
-    600_000
+    1_000_000
 }
 fn default_true() -> bool {
     true

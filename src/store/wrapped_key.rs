@@ -19,6 +19,10 @@ use crate::store::object::StoredObject;
 /// Version of the Craton HSM wrapped key format.
 const WRAPPED_KEY_FORMAT_VERSION: u32 = 1;
 
+/// Maximum size for a wrapped-key JSON blob (1 MiB). Prevents DoS via
+/// multi-GB malformed JSON payloads that could exhaust memory during parsing.
+const MAX_WRAPPED_KEY_JSON: usize = 1_048_576;
+
 /// Supported export/import formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportFormat {
@@ -187,6 +191,9 @@ pub fn import_wrapped_key_json(
     json_data: &[u8],
     max_age_secs: Option<u64>,
 ) -> HsmResult<(Vec<u8>, StoredObject)> {
+    if json_data.len() > MAX_WRAPPED_KEY_JSON {
+        return Err(HsmError::DataLenRange);
+    }
     let wrapped_key: WrappedKeyJson =
         serde_json::from_slice(json_data).map_err(|_| HsmError::DataInvalid)?;
 

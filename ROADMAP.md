@@ -1,5 +1,34 @@
 # Craton HSM Roadmap
 
+## Development Timeline
+
+```mermaid
+gantt
+    title Craton HSM Development Progress
+    dateFormat YYYY-MM
+    axisFormat %b %Y
+    section Foundation
+        Phase 1 - Core PKCS#11        :done, p1, 2025-06, 2025-07
+        Phase 2 - Advanced Crypto      :done, p2, 2025-07, 2025-08
+        Phase 3 - Post-Quantum         :done, p3, 2025-08, 2025-09
+        Phase 4 - Production Tooling   :done, p4, 2025-09, 2025-10
+    section Hardening
+        Phase 5 - Security Hardening   :done, p5, 2025-10, 2025-11
+        Phase 6 - Enterprise & Audit   :done, p6, 2025-11, 2025-12
+        Phase 7 - PKCS#11 Completeness :done, p7, 2025-12, 2026-01
+    section Polish
+        Phase 8 - Interop & Benchmarks :done, p8, 2026-01, 2026-01
+        Phase 9 - Security Polish      :done, p9, 2026-01, 2026-02
+        Phase 10 - Code Hardening      :done, p10, 2026-02, 2026-02
+        Phase 11 - Test Doubling       :done, p11, 2026-02, 2026-03
+        Phase 12 - Release Polish      :done, p12, 2026-03, 2026-03
+        Phase 13 - Actionable Items    :done, p13, 2026-03, 2026-03
+    section Future
+        Performance Optimization       :active, f1, 2026-04, 2026-06
+        FIPS 140-3 Certification       :f2, 2026-06, 2026-12
+        HSM Clustering                 :f3, 2026-06, 2026-09
+```
+
 ## Completed Phases
 
 ### Phase 1: Core PKCS#11 Foundation (26 tasks)

@@ -6,6 +6,42 @@ Craton HSM supports a FIPS-approved mode of operation when configured correctly.
 
 ---
 
+## FIPS Build and Verification Pipeline
+
+```mermaid
+flowchart LR
+    subgraph build ["Build Phase"]
+        SRC["Source Code"] --> CARGO["cargo build --release<br/>--features awslc-backend"]
+        CARGO --> LIB["libcraton_hsm.so"]
+    end
+    subgraph integrity ["Integrity Sidecar"]
+        LIB --> HMAC["compute-integrity-hmac.sh"]
+        HMAC --> SIDECAR[".hmac sidecar file"]
+    end
+    subgraph deploy ["Deploy"]
+        LIB --> SHIP["Library + .hmac"]
+        SIDECAR --> SHIP
+    end
+    subgraph verify ["C_Initialize Verification"]
+        SHIP --> POST["POST runs"]
+        POST --> INTEG{"HMAC<br/>match?"}
+        INTEG -->|Yes| KATS["16 KATs"]
+        INTEG -->|No| FAIL1["POST_FAILED"]
+        KATS --> PASS{"All pass?"}
+        PASS -->|Yes| READY(["Module Ready"])
+        PASS -->|No| FAIL2["POST_FAILED"]
+    end
+
+    classDef success fill:#1a6e2e,color:#fff
+    classDef fail fill:#7a2d2d,color:#fff
+    classDef build fill:#2d4a7a,color:#fff
+    class READY success
+    class FAIL1,FAIL2 fail
+    class SRC,CARGO,LIB,HMAC,SIDECAR build
+```
+
+---
+
 ## 1. Build for FIPS
 
 ### Required: aws-lc-rs Backend
@@ -53,6 +89,25 @@ enable_pqc = false
 ```
 
 ### Configuration Effects
+
+```mermaid
+flowchart TD
+    ALL["41 PKCS#11 Mechanisms"] --> FIPS{"fips_approved_only<br/>= true?"}
+    FIPS -->|No| AVAIL(["All 41 mechanisms available"])
+    FIPS -->|Yes| FILTER["Filter mechanism list"]
+    FILTER --> BLOCK_ED["Block Ed25519"]
+    FILTER --> BLOCK_PQC["Block ML-DSA, ML-KEM,<br/>SLH-DSA, Hybrids"]
+    FILTER --> BLOCK_SHA1["Block SHA-1 signing"]
+    FILTER --> BLOCK_RSA["Block RSA < 2048"]
+    BLOCK_ED & BLOCK_PQC & BLOCK_SHA1 & BLOCK_RSA --> APPROVED(["FIPS-approved<br/>mechanisms only"])
+
+    classDef blocked fill:#7a2d2d,color:#fff
+    classDef approved fill:#1a6e2e,color:#fff
+    classDef all fill:#2d4a7a,color:#fff
+    class BLOCK_ED,BLOCK_PQC,BLOCK_SHA1,BLOCK_RSA blocked
+    class AVAIL,APPROVED approved
+    class ALL all
+```
 
 When `fips_approved_only = true`:
 

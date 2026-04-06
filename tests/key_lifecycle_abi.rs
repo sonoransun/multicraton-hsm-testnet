@@ -240,6 +240,111 @@ fn generate_rsa_keypair(session: CK_SESSION_HANDLE) -> (CK_OBJECT_HANDLE, CK_OBJ
     (pub_key, priv_key)
 }
 
+/// Generate RSA-2048 keypair with optional start/end dates on the private key.
+fn generate_rsa_keypair_with_dates(
+    session: CK_SESSION_HANDLE,
+    start_date: Option<&[u8; 8]>,
+    end_date: Option<&[u8; 8]>,
+) -> (CK_OBJECT_HANDLE, CK_OBJECT_HANDLE) {
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS_KEY_PAIR_GEN,
+        p_parameter: ptr::null_mut(),
+        parameter_len: 0,
+    };
+    let modulus_bits_bytes = ck_ulong_bytes(2048);
+    let public_exponent: [u8; 3] = [0x01, 0x00, 0x01];
+    let ck_true: CK_BBOOL = CK_TRUE;
+
+    let mut pub_template = vec![
+        CK_ATTRIBUTE {
+            attr_type: CKA_MODULUS_BITS,
+            p_value: modulus_bits_bytes.as_ptr() as CK_VOID_PTR,
+            value_len: modulus_bits_bytes.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            attr_type: CKA_PUBLIC_EXPONENT,
+            p_value: public_exponent.as_ptr() as CK_VOID_PTR,
+            value_len: 3,
+        },
+        CK_ATTRIBUTE {
+            attr_type: CKA_ENCRYPT,
+            p_value: &ck_true as *const _ as CK_VOID_PTR,
+            value_len: 1,
+        },
+        CK_ATTRIBUTE {
+            attr_type: CKA_VERIFY,
+            p_value: &ck_true as *const _ as CK_VOID_PTR,
+            value_len: 1,
+        },
+    ];
+    // Apply dates to the public key template as well so verify lifecycle checks work
+    if let Some(sd) = start_date {
+        pub_template.push(CK_ATTRIBUTE {
+            attr_type: CKA_START_DATE,
+            p_value: sd.as_ptr() as CK_VOID_PTR,
+            value_len: 8,
+        });
+    }
+    if let Some(ed) = end_date {
+        pub_template.push(CK_ATTRIBUTE {
+            attr_type: CKA_END_DATE,
+            p_value: ed.as_ptr() as CK_VOID_PTR,
+            value_len: 8,
+        });
+    }
+
+    let mut priv_template = vec![
+        CK_ATTRIBUTE {
+            attr_type: CKA_DECRYPT,
+            p_value: &ck_true as *const _ as CK_VOID_PTR,
+            value_len: 1,
+        },
+        CK_ATTRIBUTE {
+            attr_type: CKA_SIGN,
+            p_value: &ck_true as *const _ as CK_VOID_PTR,
+            value_len: 1,
+        },
+        CK_ATTRIBUTE {
+            attr_type: CKA_SENSITIVE,
+            p_value: &ck_true as *const _ as CK_VOID_PTR,
+            value_len: 1,
+        },
+    ];
+    if let Some(sd) = start_date {
+        priv_template.push(CK_ATTRIBUTE {
+            attr_type: CKA_START_DATE,
+            p_value: sd.as_ptr() as CK_VOID_PTR,
+            value_len: 8,
+        });
+    }
+    if let Some(ed) = end_date {
+        priv_template.push(CK_ATTRIBUTE {
+            attr_type: CKA_END_DATE,
+            p_value: ed.as_ptr() as CK_VOID_PTR,
+            value_len: 8,
+        });
+    }
+
+    let mut pub_key: CK_OBJECT_HANDLE = 0;
+    let mut priv_key: CK_OBJECT_HANDLE = 0;
+    let rv = C_GenerateKeyPair(
+        session,
+        &mut mechanism,
+        pub_template.as_mut_ptr(),
+        pub_template.len() as CK_ULONG,
+        priv_template.as_mut_ptr(),
+        priv_template.len() as CK_ULONG,
+        &mut pub_key,
+        &mut priv_key,
+    );
+    assert_eq!(
+        rv, CKR_OK,
+        "generate_rsa_keypair_with_dates failed: 0x{:08X}",
+        rv
+    );
+    (pub_key, priv_key)
+}
+
 // ============================================================================
 // Basic lifecycle: Active key (default) - all operations work
 // ============================================================================
@@ -778,4 +883,74 @@ fn test_destroy_double_destroy_fails() {
     assert_eq!(rv, CKR_OK, "First destroy should succeed");
     let rv = C_DestroyObject(session, key);
     assert_ne!(rv, CKR_OK, "Double destroy should fail");
+}
+
+// ============================================================================
+// Deactivated key: sign blocked, verify allowed (SP 800-57)
+// ============================================================================
+
+#[test]
+fn test_deactivated_key_blocks_sign() {
+    let session = setup_user_session();
+    // CKA_END_DATE in the past means the key is deactivated
+    let past_start: [u8; 8] = *b"20200101";
+    let past_end: [u8; 8] = *b"20200101";
+    let (_pub_key, priv_key) =
+        generate_rsa_keypair_with_dates(session, Some(&past_start), Some(&past_end));
+    let mut mech = CK_MECHANISM {
+        mechanism: CKM_SHA256_RSA_PKCS,
+        p_parameter: ptr::null_mut(),
+        parameter_len: 0,
+    };
+    let rv = C_SignInit(session, &mut mech, priv_key);
+    assert_eq!(
+        rv, CKR_KEY_FUNCTION_NOT_PERMITTED,
+        "Deactivated key should block C_SignInit with CKR_KEY_FUNCTION_NOT_PERMITTED, got: 0x{:08X}",
+        rv
+    );
+}
+
+#[test]
+fn test_deactivated_key_allows_verify() {
+    let session = setup_user_session();
+    // Same deactivated key — verify should still be permitted per SP 800-57
+    let past_start: [u8; 8] = *b"20200101";
+    let past_end: [u8; 8] = *b"20200101";
+    let (pub_key, _priv_key) =
+        generate_rsa_keypair_with_dates(session, Some(&past_start), Some(&past_end));
+    let mut mech = CK_MECHANISM {
+        mechanism: CKM_SHA256_RSA_PKCS,
+        p_parameter: ptr::null_mut(),
+        parameter_len: 0,
+    };
+    let rv = C_VerifyInit(session, &mut mech, pub_key);
+    assert_eq!(
+        rv, CKR_OK,
+        "Deactivated key should allow C_VerifyInit (processing existing data), got: 0x{:08X}",
+        rv
+    );
+}
+
+// ============================================================================
+// Pre-activation key: encrypt blocked (SP 800-57)
+// ============================================================================
+
+#[test]
+fn test_preactivation_key_blocks_encrypt() {
+    let session = setup_user_session();
+    // CKA_START_DATE in the future means the key is pre-activation
+    let future_date: [u8; 8] = *b"20990101";
+    let key = generate_aes_key_with_dates(session, Some(&future_date), None);
+    let iv = [0u8; 12];
+    let mut mech = CK_MECHANISM {
+        mechanism: CKM_AES_GCM,
+        p_parameter: iv.as_ptr() as CK_VOID_PTR,
+        parameter_len: iv.len() as CK_ULONG,
+    };
+    let rv = C_EncryptInit(session, &mut mech, key);
+    assert_eq!(
+        rv, CKR_KEY_FUNCTION_NOT_PERMITTED,
+        "Pre-activation key should block C_EncryptInit with CKR_KEY_FUNCTION_NOT_PERMITTED, got: 0x{:08X}",
+        rv
+    );
 }

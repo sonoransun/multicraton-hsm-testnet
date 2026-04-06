@@ -140,6 +140,18 @@ pub fn is_post_failed() -> bool {
     POST_FAILED.load(Ordering::Acquire)
 }
 
+/// Test-only: force POST_FAILED state to verify error gating.
+#[doc(hidden)]
+pub fn test_force_post_failed() {
+    POST_FAILED.store(true, std::sync::atomic::Ordering::Release);
+}
+
+/// Test-only: clear POST_FAILED state.
+#[doc(hidden)]
+pub fn test_clear_post_failed() {
+    POST_FAILED.store(false, std::sync::atomic::Ordering::Release);
+}
+
 fn get_hsm() -> Result<Arc<HsmCore>, CK_RV> {
     if POST_FAILED.load(Ordering::Acquire) {
         return Err(CKR_GENERAL_ERROR);
@@ -269,8 +281,11 @@ pub extern "C" fn C_Initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
             .record(0, AuditOperation::Initialize, AuditResult::Success, None);
         *guard = Some(core);
         // Bump generation so any stale TLS caches from a prior init/finalize
-        // cycle are invalidated.
-        HSM_GENERATION.fetch_add(1, Ordering::Release);
+        // cycle are invalidated.  Saturate at u64::MAX to prevent wraparound
+        // back to 0 (which could match a stale TLS cache entry).
+        let _ = HSM_GENERATION.fetch_update(Ordering::Release, Ordering::Acquire, |v| {
+            Some(v.saturating_add(1))
+        });
         CKR_OK
     })
     .unwrap_or(CKR_GENERAL_ERROR)
@@ -298,8 +313,11 @@ pub extern "C" fn C_Finalize(p_reserved: CK_VOID_PTR) -> CK_RV {
         // Reset state so a subsequent C_Initialize can succeed (PKCS#11 spec compliant)
         *guard = None;
         INIT_PID.store(0, Ordering::Release);
-        // Invalidate all thread-local HSM caches.
-        HSM_GENERATION.fetch_add(1, Ordering::Release);
+        // Invalidate all thread-local HSM caches.  Saturate to prevent
+        // wraparound (see C_Initialize counterpart).
+        let _ = HSM_GENERATION.fetch_update(Ordering::Release, Ordering::Acquire, |v| {
+            Some(v.saturating_add(1))
+        });
         CACHED_HSM.with(|c| *c.borrow_mut() = None);
         crate::session::tls_cache::clear_session_cache();
         CKR_OK

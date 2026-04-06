@@ -18,10 +18,6 @@ pub mod rustcrypto_backend;
 pub mod self_test;
 pub mod sign;
 pub mod wrap;
-// Temporarily disabled enhanced backends to focus on wrapped key functionality
-// pub mod enhanced_backend;
-// #[cfg(feature = "rustcrypto-backend")]
-// pub mod enhanced_rustcrypto_backend;
 
 // ── Cutting-edge crypto modules ───────────────────────────────────────────────
 

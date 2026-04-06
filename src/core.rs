@@ -17,9 +17,6 @@ use crate::store::attributes::ObjectStore;
 use crate::token::slot::SlotManager;
 use zeroize::Zeroizing;
 
-/// Enhanced HSM core with clustering and advanced features.
-// Temporarily disabled to focus on wrapped key functionality
-// pub mod enhanced;
 
 /// The global HSM state. Holds all managers needed for PKCS#11 operations.
 pub struct HsmCore {

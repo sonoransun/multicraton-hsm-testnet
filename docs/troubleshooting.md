@@ -1,5 +1,26 @@
 # Troubleshooting
 
+## Quick Diagnostic Flowchart
+
+```mermaid
+flowchart TD
+    START["PKCS#11 call failed"] --> CODE{"Error code?"}
+    CODE -->|"CKR_GENERAL_ERROR (5)"| POST["POST failed<br/>Check binary integrity<br/><i>Rebuild or recompute .hmac</i>"]
+    CODE -->|"CKR_CRYPTOKI_NOT_INITIALIZED (257)"| INIT["Call C_Initialize first<br/><i>Or: fork detected — re-init</i>"]
+    CODE -->|"CKR_PIN_LOCKED (163)"| PIN["SO must reset PIN<br/><i>craton-hsm-admin pin reset</i>"]
+    CODE -->|"CKR_MECHANISM_INVALID (112)"| MECH["Check algorithm policy<br/>& feature flags<br/><i>C_GetMechanismList</i>"]
+    CODE -->|"CKR_SESSION_HANDLE_INVALID (11)"| SESS["Re-open session<br/><i>C_OpenSession</i>"]
+    CODE -->|"CKR_USER_NOT_LOGGED_IN (256)"| LOGIN["Call C_Login first<br/><i>with User PIN</i>"]
+    CODE -->|"Other"| TABLE["See error tables below"]
+
+    classDef error fill:#7a2d2d,color:#fff
+    classDef fix fill:#1a6e2e,color:#fff
+    classDef info fill:#2d4a7a,color:#fff
+    class START,CODE info
+    class POST,INIT,PIN,MECH,SESS,LOGIN error
+    class TABLE fix
+```
+
 ## Common PKCS#11 Error Codes
 
 When a `C_*` function fails, it returns a `CK_RV` error code. Below are the most common ones, their causes, and fixes.

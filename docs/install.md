@@ -50,6 +50,25 @@ cargo build --release --workspace
 | Admin CLI | `target/release/craton-hsm-admin` | `target/release/craton-hsm-admin.exe` | Token/key/PIN management |
 | Spy wrapper | `target/release/libpkcs11_spy.so` | `target/release/pkcs11_spy.dll` | PKCS#11 call interceptor |
 
+## Deployment Options
+
+```mermaid
+flowchart TD
+    Q["How will you consume<br/>Craton HSM?"]
+    Q --> LIB["Shared Library<br/><i>dlopen in-process</i>"]
+    Q --> NET["Network Daemon<br/><i>gRPC over mTLS</i>"]
+    Q --> K8S["Kubernetes<br/><i>Helm chart sidecar</i>"]
+
+    LIB --> LIB_D["Lowest latency<br/>Single-process only<br/><br/>cargo build --release<br/>→ libcraton_hsm.so"]
+    NET --> NET_D["Multi-process access<br/>Centralized key store<br/><br/>cargo build -p craton-hsm-daemon<br/>→ port 5696"]
+    K8S --> K8S_D["Cloud-native<br/>Auto-scaling<br/><br/>helm install craton-hsm<br/>deploy/helm/craton_hsm"]
+
+    classDef option fill:#2d4a7a,color:#fff
+    classDef detail fill:#e0e0e0,color:#333
+    class LIB,NET,K8S option
+    class LIB_D,NET_D,K8S_D detail
+```
+
 ## Run Tests
 
 ```bash

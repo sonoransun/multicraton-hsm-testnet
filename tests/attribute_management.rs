@@ -727,3 +727,173 @@ fn test_find_and_get_combined_workflow() {
         id.as_slice()
     );
 }
+
+// ============================================================================
+// Security: Attribute modification attack tests
+//
+// PKCS#11 §10.7: CKA_SENSITIVE, CKA_EXTRACTABLE, and CKA_CLASS are
+// read-only after object creation. Attempts to change them in ANY direction
+// via C_SetAttributeValue MUST return CKR_ATTRIBUTE_READ_ONLY.
+// ============================================================================
+
+/// Downgrading CKA_SENSITIVE (true→false) via C_SetAttributeValue is blocked.
+#[test]
+fn test_set_sensitive_true_to_false_rejected() {
+    let session = setup_user_session();
+    // Generate key with CKA_SENSITIVE=true (default)
+    let key = generate_aes_key(session, b"sens_downgrade");
+
+    let ck_false: CK_BBOOL = CK_FALSE;
+    let mut template = [CK_ATTRIBUTE {
+        attr_type: CKA_SENSITIVE,
+        p_value: &ck_false as *const _ as CK_VOID_PTR,
+        value_len: 1,
+    }];
+    let rv = C_SetAttributeValue(session, key, template.as_mut_ptr(), 1);
+    assert_eq!(
+        rv, CKR_ATTRIBUTE_READ_ONLY,
+        "CKA_SENSITIVE downgrade should be rejected"
+    );
+}
+
+/// Upgrading CKA_SENSITIVE (false→true) via C_SetAttributeValue is also blocked
+/// (attribute is read-only after creation, regardless of direction).
+#[test]
+fn test_set_sensitive_false_to_true_rejected() {
+    let session = setup_user_session();
+
+    // Generate key with CKA_SENSITIVE=false
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_KEY_GEN,
+        p_parameter: ptr::null_mut(),
+        parameter_len: 0,
+    };
+    let value_len_bytes = ck_ulong_bytes(32);
+    let ck_true: CK_BBOOL = CK_TRUE;
+    let ck_false: CK_BBOOL = CK_FALSE;
+    let label = b"sens_upgrade";
+    let mut template = vec![
+        CK_ATTRIBUTE {
+            attr_type: CKA_VALUE_LEN,
+            p_value: value_len_bytes.as_ptr() as CK_VOID_PTR,
+            value_len: value_len_bytes.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            attr_type: CKA_ENCRYPT,
+            p_value: &ck_true as *const _ as CK_VOID_PTR,
+            value_len: 1,
+        },
+        CK_ATTRIBUTE {
+            attr_type: CKA_SENSITIVE,
+            p_value: &ck_false as *const _ as CK_VOID_PTR,
+            value_len: 1,
+        },
+        CK_ATTRIBUTE {
+            attr_type: CKA_LABEL,
+            p_value: label.as_ptr() as CK_VOID_PTR,
+            value_len: label.len() as CK_ULONG,
+        },
+    ];
+    let mut key: CK_OBJECT_HANDLE = 0;
+    let rv = C_GenerateKey(
+        session,
+        &mut mechanism,
+        template.as_mut_ptr(),
+        template.len() as CK_ULONG,
+        &mut key,
+    );
+    assert_eq!(rv, CKR_OK);
+
+    // Try upgrading CKA_SENSITIVE from false→true — should be read-only
+    let mut set_template = [CK_ATTRIBUTE {
+        attr_type: CKA_SENSITIVE,
+        p_value: &ck_true as *const _ as CK_VOID_PTR,
+        value_len: 1,
+    }];
+    let rv = C_SetAttributeValue(session, key, set_template.as_mut_ptr(), 1);
+    assert_eq!(
+        rv, CKR_ATTRIBUTE_READ_ONLY,
+        "CKA_SENSITIVE upgrade should be rejected (read-only after creation)"
+    );
+}
+
+/// Upgrading CKA_EXTRACTABLE (false→true) via C_SetAttributeValue is blocked.
+#[test]
+fn test_set_extractable_false_to_true_rejected() {
+    let session = setup_user_session();
+    // Default key has CKA_EXTRACTABLE=false
+    let key = generate_aes_key(session, b"extr_upgrade");
+
+    let ck_true: CK_BBOOL = CK_TRUE;
+    let mut template = [CK_ATTRIBUTE {
+        attr_type: CKA_EXTRACTABLE,
+        p_value: &ck_true as *const _ as CK_VOID_PTR,
+        value_len: 1,
+    }];
+    let rv = C_SetAttributeValue(session, key, template.as_mut_ptr(), 1);
+    assert_eq!(
+        rv, CKR_ATTRIBUTE_READ_ONLY,
+        "CKA_EXTRACTABLE upgrade should be rejected"
+    );
+}
+
+/// Downgrading CKA_EXTRACTABLE (true→false) via C_SetAttributeValue is also blocked
+/// (attribute is read-only after creation, regardless of direction).
+#[test]
+fn test_set_extractable_true_to_false_rejected() {
+    let session = setup_user_session();
+
+    // Generate key with CKA_EXTRACTABLE=true
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_KEY_GEN,
+        p_parameter: ptr::null_mut(),
+        parameter_len: 0,
+    };
+    let value_len_bytes = ck_ulong_bytes(32);
+    let ck_true: CK_BBOOL = CK_TRUE;
+    let ck_false: CK_BBOOL = CK_FALSE;
+    let label = b"extr_downgrade";
+    let mut template = vec![
+        CK_ATTRIBUTE {
+            attr_type: CKA_VALUE_LEN,
+            p_value: value_len_bytes.as_ptr() as CK_VOID_PTR,
+            value_len: value_len_bytes.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            attr_type: CKA_ENCRYPT,
+            p_value: &ck_true as *const _ as CK_VOID_PTR,
+            value_len: 1,
+        },
+        CK_ATTRIBUTE {
+            attr_type: CKA_EXTRACTABLE,
+            p_value: &ck_true as *const _ as CK_VOID_PTR,
+            value_len: 1,
+        },
+        CK_ATTRIBUTE {
+            attr_type: CKA_LABEL,
+            p_value: label.as_ptr() as CK_VOID_PTR,
+            value_len: label.len() as CK_ULONG,
+        },
+    ];
+    let mut key: CK_OBJECT_HANDLE = 0;
+    let rv = C_GenerateKey(
+        session,
+        &mut mechanism,
+        template.as_mut_ptr(),
+        template.len() as CK_ULONG,
+        &mut key,
+    );
+    assert_eq!(rv, CKR_OK);
+
+    // Try downgrading CKA_EXTRACTABLE from true→false — should be read-only
+    let mut set_template = [CK_ATTRIBUTE {
+        attr_type: CKA_EXTRACTABLE,
+        p_value: &ck_false as *const _ as CK_VOID_PTR,
+        value_len: 1,
+    }];
+    let rv = C_SetAttributeValue(session, key, set_template.as_mut_ptr(), 1);
+    assert_eq!(
+        rv, CKR_ATTRIBUTE_READ_ONLY,
+        "CKA_EXTRACTABLE downgrade should be rejected (read-only after creation)"
+    );
+}

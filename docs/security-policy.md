@@ -23,32 +23,33 @@ The module runs as a shared library (`libcraton_hsm.so` / `craton_hsm.dll`) load
 
 ### 1.1 Module Architecture
 
-```
-+---------------------------------------------------------------+
-|                    Cryptographic Module Boundary                |
-|                                                                 |
-|  +-------------------+  +------------------+  +--------------+ |
-|  | PKCS#11 C ABI     |  | gRPC Interface   |  | Admin CLI    | |
-|  | (libcraton_hsm.so)   |  | (craton-hsm-daemon) |  | (craton_hsm-   | |
-|  |                    |  |                  |  |  admin)      | |
-|  +--------+-----------+  +--------+---------+  +------+-------+ |
-|           |                       |                    |         |
-|  +--------v-----------------------v--------------------v-------+ |
-|  |                      HsmCore                                | |
-|  |  +------------------+  +------------------+                 | |
-|  |  | SessionManager   |  | SlotManager      |                 | |
-|  |  | (DashMap)        |  | (Token, PIN)     |                 | |
-|  |  +------------------+  +------------------+                 | |
-|  |  +------------------+  +------------------+                 | |
-|  |  | ObjectStore      |  | CryptoBackend    |                 | |
-|  |  | (in-memory +     |  | (RustCrypto or   |                 | |
-|  |  |  EncryptedStore) |  |  aws-lc-rs)      |                 | |
-|  |  +------------------+  +------------------+                 | |
-|  |  +------------------+  +------------------+                 | |
-|  |  | AuditLog         |  | Self-Test (POST) |                 | |
-|  |  +------------------+  +------------------+                 | |
-|  +-------------------------------------------------------------+ |
-+---------------------------------------------------------------+
+```mermaid
+graph TB
+    subgraph boundary ["Cryptographic Module Boundary"]
+        direction TB
+        subgraph interfaces ["Interfaces"]
+            ABI["PKCS#11 C ABI<br/>libcraton_hsm.so<br/>70+ exports"]
+            GRPC["gRPC Interface<br/>craton-hsm-daemon<br/>mTLS"]
+            CLI["Admin CLI<br/>craton-hsm-admin"]
+        end
+        subgraph core ["HsmCore"]
+            SM["SessionManager<br/><i>DashMap</i>"]
+            SL["SlotManager<br/><i>Token, PIN</i>"]
+            OS["ObjectStore<br/><i>in-memory +<br/>EncryptedStore</i>"]
+            CB["CryptoBackend<br/><i>RustCrypto or<br/>aws-lc-rs</i>"]
+            AL["AuditLog<br/><i>chained SHA-256</i>"]
+            ST["Self-Test<br/><i>POST: 17 KATs</i>"]
+        end
+        ABI --> core
+        GRPC --> core
+        CLI --> core
+    end
+
+    classDef boundaryStyle fill:none,stroke:#2d4a7a,stroke-width:3px,stroke-dasharray:5 5
+    classDef interfaceStyle fill:#e0e0e0,color:#333
+    classDef coreStyle fill:#2d4a7a,color:#fff
+    class ABI,GRPC,CLI interfaceStyle
+    class SM,SL,OS,CB,AL,ST coreStyle
 ```
 
 ### 1.2 Physical Boundary
@@ -114,36 +115,32 @@ Default PINs:
 
 ### 4.1 Module States
 
-```
-                    +---------------+
-                    |   Power Off   |
-                    +-------+-------+
-                            |
-                            v
-                    +-------+-------+
-             +----->|  POST Running |
-             |      +-------+-------+
-             |              |
-             |        Pass  |  Fail
-             |     +--------+--------+
-             |     v                 v
-      +------+-----+        +-------+-------+
-      | Initialized |        |  POST Failed  |
-      | (Ready)     |        | (Error State)  |
-      +------+------+        +---------------+
-             |                  All operations
-             |                  return CKR_
-             |                  GENERAL_ERROR
-     C_Login |
-             v
-      +------+------+
-      | Authenticated|
-      | (Operational)|
-      +------+------+
-             |
-     C_Logout|
-             v
-      (back to Initialized)
+```mermaid
+stateDiagram-v2
+    [*] --> PowerOff
+    PowerOff --> POSTRunning: C_Initialize
+    POSTRunning --> Initialized: All 17 tests pass
+    POSTRunning --> POSTFailed: Any test fails
+
+    Initialized --> Authenticated: C_Login(PIN)
+    Authenticated --> Initialized: C_Logout
+    Initialized --> POSTRunning: C_Finalize + C_Initialize
+
+    state POSTFailed {
+        [*] --> ErrorState
+        ErrorState: All operations return<br/>CKR_GENERAL_ERROR
+    }
+
+    POSTFailed --> POSTRunning: C_Finalize + C_Initialize
+
+    classDef success fill:#1a6e2e,color:#fff
+    classDef ready fill:#7a5c2d,color:#fff
+    classDef failed fill:#7a2d2d,color:#fff
+    classDef running fill:#2d4a7a,color:#fff
+    class Authenticated success
+    class Initialized ready
+    class POSTFailed,ErrorState failed
+    class POSTRunning running
 ```
 
 ### 4.2 Session States
@@ -430,15 +427,26 @@ The following table documents all Critical Security Parameters managed by the mo
 
 ### 11.1 CSP Lifecycle
 
-```
-Generation/Import --> mlock() --> Active Use --> zeroize() --> munlock() --> Destroyed
-                      |                           |
-                      |  (if persistent)           |
-                      +-> AES-256-GCM encrypt ->   |
-                          store in redb             |
-                                                   |
-                      (if persistent)              |
-                      delete from redb <-----------+
+```mermaid
+flowchart LR
+    GEN["Generation<br/>/ Import"] --> MLOCK["mlock()"]
+    MLOCK --> ACTIVE["Active Use<br/><i>crypto ops</i>"]
+    ACTIVE --> ZERO["zeroize()"]
+    ZERO --> MUNLOCK["munlock()"]
+    MUNLOCK --> DEST["Destroyed"]
+
+    MLOCK -->|if persistent| ENC["AES-256-GCM<br/>encrypt"]
+    ENC --> REDB["Store in redb"]
+
+    ACTIVE -->|if persistent| DEL["Delete from redb"]
+    DEL --> ZERO
+
+    classDef protected fill:#2d4a7a,color:#fff
+    classDef destroyed fill:#7a2d2d,color:#fff
+    classDef storage fill:#4a2d7a,color:#fff
+    class GEN,MLOCK,ACTIVE protected
+    class ZERO,MUNLOCK,DEST destroyed
+    class ENC,REDB,DEL storage
 ```
 
 ### 11.2 CSP Access Control

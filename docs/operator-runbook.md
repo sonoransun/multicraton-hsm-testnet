@@ -4,6 +4,28 @@ This runbook covers day-to-day operations for Craton HSM administrators: token s
 
 ## Token Initialization
 
+```mermaid
+flowchart TD
+    START(["Start"]) --> CHECK{"Token already<br/>initialized?"}
+    CHECK -->|No| INIT["craton-hsm-admin<br/>token init --label ..."]
+    INIT --> SOPIN["Set SO PIN<br/><i>4-64 chars, not echoed</i>"]
+    SOPIN --> VERIFY["craton-hsm-admin<br/>token info"]
+    VERIFY --> READY(["Token Ready"])
+
+    CHECK -->|Yes| WARN["⚠ WARNING<br/>Re-init destroys<br/>all stored objects"]
+    WARN --> CONFIRM{"Confirm with<br/>SO PIN?"}
+    CONFIRM -->|Yes| REINIT["Re-initialize token"]
+    REINIT --> SOPIN
+    CONFIRM -->|No| ABORT(["Abort"])
+
+    classDef success fill:#1a6e2e,color:#fff
+    classDef warning fill:#7a5c2d,color:#fff
+    classDef danger fill:#7a2d2d,color:#fff
+    class READY success
+    class WARN,CONFIRM warning
+    class ABORT danger
+```
+
 ### First-time setup
 
 ```bash
@@ -78,6 +100,28 @@ craton-hsm-admin pin reset
 
 ### PIN lockout recovery
 
+```mermaid
+flowchart TD
+    LOGIN["C_Login(USER, PIN)"] --> CHECK{"PIN correct?"}
+    CHECK -->|Yes| AUTH(["Authenticated"])
+    CHECK -->|No| INC["Increment failure<br/>counter"]
+    INC --> MAX{"Counter ≥<br/>max_failed_logins?"}
+    MAX -->|No| BACK["Backoff: 100ms base<br/><i>doubles per failure, max 5s</i>"]
+    BACK --> LOGIN
+    MAX -->|Yes| LOCKED["PIN_LOCKED<br/>CKR_PIN_LOCKED"]
+    LOCKED --> SO["SO authenticates<br/>craton-hsm-admin pin reset"]
+    SO --> NEWPIN["Set new User PIN"]
+    NEWPIN --> COMM["Communicate PIN<br/>via secure channel"]
+    COMM --> LOGIN
+
+    classDef success fill:#1a6e2e,color:#fff
+    classDef danger fill:#7a2d2d,color:#fff
+    classDef warning fill:#7a5c2d,color:#fff
+    class AUTH success
+    class LOCKED danger
+    class BACK,INC warning
+```
+
 1. Identify the lockout: application receives `CKR_PIN_LOCKED`
 2. SO authenticates: `craton-hsm-admin pin reset`
 3. Set a new user PIN
@@ -124,6 +168,42 @@ craton-hsm-admin key delete --handle 42 --force
 ```
 
 ### Key lifecycle states (SP 800-57)
+
+```mermaid
+stateDiagram-v2
+    [*] --> PreActivation: C_GenerateKey /<br/>C_CreateObject
+
+    PreActivation --> Active: CKA_START_DATE reached
+    Active --> Deactivated: CKA_END_DATE passed
+    Active --> Compromised: Manual marking
+    Active --> Destroyed: C_DestroyObject
+
+    Deactivated --> Destroyed: C_DestroyObject
+    Compromised --> Destroyed: C_DestroyObject
+    PreActivation --> Destroyed: C_DestroyObject
+
+    state Active {
+        [*] --> AllOps
+        AllOps: Sign, Verify, Encrypt,<br/>Decrypt, Wrap, Unwrap
+    }
+    state Deactivated {
+        [*] --> LimitedOps
+        LimitedOps: Verify, Decrypt,<br/>Unwrap only
+    }
+    state Compromised {
+        [*] --> NoOps
+        NoOps: No operations permitted
+    }
+
+    classDef active fill:#1a6e2e,color:#fff
+    classDef pending fill:#7a5c2d,color:#fff
+    classDef danger fill:#7a2d2d,color:#fff
+    classDef gone fill:#e0e0e0,color:#333
+    class Active active
+    class PreActivation,Deactivated pending
+    class Compromised danger
+    class Destroyed gone
+```
 
 Craton HSM supports date-based key lifecycle management per SP 800-57:
 

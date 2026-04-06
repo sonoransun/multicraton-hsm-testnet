@@ -8,6 +8,64 @@ The shared library (`libcraton_hsm.so` / `craton_hsm.dll` / `libcraton_hsm.dylib
 
 Any PKCS#11-aware consumer (OpenSSL engines, Java SunPKCS11, Firefox NSS, `pkcs11-tool`, etc.) can load the library directly.
 
+### Canonical PKCS#11 Call Sequence
+
+The following diagram shows the standard lifecycle of a PKCS#11 session, from library initialization through cryptographic operations to finalization:
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant HSM as Craton HSM
+
+    Note over HSM: POST runs (17 self-tests)
+    App->>HSM: C_Initialize(NULL)
+    HSM-->>App: CKR_OK
+
+    App->>HSM: C_GetSlotList(TRUE, ...)
+    HSM-->>App: slot IDs
+
+    App->>HSM: C_OpenSession(slotID, flags)
+    HSM-->>App: hSession
+
+    App->>HSM: C_Login(hSession, CKU_USER, PIN)
+    HSM-->>App: CKR_OK
+
+    rect rgb(45, 74, 122)
+        Note over App,HSM: Crypto Operations
+        App->>HSM: C_SignInit(hSession, mechanism, hKey)
+        HSM-->>App: CKR_OK
+        App->>HSM: C_Sign(hSession, data, sig)
+        HSM-->>App: signature bytes
+    end
+
+    App->>HSM: C_Logout(hSession)
+    App->>HSM: C_CloseSession(hSession)
+    App->>HSM: C_Finalize(NULL)
+```
+
+### Multi-Part Operation Pattern
+
+PKCS#11 supports multi-part operations for processing data in chunks (digest, sign, encrypt):
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant HSM as Craton HSM
+
+    App->>HSM: C_DigestInit(hSession, SHA-256)
+    HSM-->>App: CKR_OK
+
+    loop For each data chunk
+        App->>HSM: C_DigestUpdate(hSession, chunk_n)
+        HSM-->>App: CKR_OK
+    end
+
+    App->>HSM: C_DigestFinal(hSession)
+    HSM-->>App: 32-byte digest
+
+    Note over App,HSM: Same pattern applies to:<br/>C_SignInit → C_SignUpdate → C_SignFinal<br/>C_EncryptInit → C_EncryptUpdate → C_EncryptFinal
+```
+
 ### Loading the Library
 
 ```bash
