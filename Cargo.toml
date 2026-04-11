@@ -114,7 +114,10 @@ ctr = "0.9"
 cipher = "0.5"
 hmac = "0.12"
 sha1 = "0.10"
-sha2 = "0.10"
+# `asm` enables hand-tuned SHA-256 assembly on x86_64 (SHA-NI when available
+# at runtime via `cpufeatures`) and ARMv8 SHA2 extensions on aarch64. Pure-Rust
+# fallback is retained automatically on targets without the asm backend.
+sha2 = { version = "0.10", features = ["asm"] }
 sha3 = "0.10"
 pbkdf2 = { version = "0.12", features = ["hmac"] }
 subtle = "2"
@@ -171,6 +174,12 @@ serde_json = "1"
 # Hex encoding (used by integrity test)
 hex = "0.4"
 
+# CBOR codec for attestation tokens (IETF RATS EAT) and AWS Nitro NSM
+# request framing in src/advanced/attestation.rs. Pure Rust, no C deps.
+# We use ciborium (the maintained successor) rather than the unmaintained
+# serde_cbor crate.
+ciborium = "0.2"
+
 # Optional FIPS-validated backend
 aws-lc-rs = { version = "1", features = ["fips"], optional = true }
 
@@ -209,8 +218,11 @@ rayon = { version = "1.10", optional = true }
 
 # ── Cutting-edge optional dependencies ───────────────────────────────────────
 
-# BLAKE3: parallel Merkle-tree hash (BLAKE3 team / Zcash Foundation)
-blake3 = { version = "1", optional = true }
+# BLAKE3: parallel Merkle-tree hash (BLAKE3 team / Zcash Foundation).
+# The `rayon` feature unlocks multi-threaded tree hashing for large inputs;
+# worth enabling because the blake3-hash feature is specifically for bulk
+# hashing workloads where parallelism pays off.
+blake3 = { version = "1", features = ["rayon"], optional = true }
 
 # X25519 Diffie-Hellman for Hybrid KEM (static_secrets needed for long-term keys)
 x25519-dalek = { version = "2", features = ["static_secrets"], optional = true }
@@ -290,6 +302,18 @@ harness = false
 lto = true
 codegen-units = 1
 strip = "symbols"
+
+# For a tuned build (opt-in, packager-driven), invoke cargo with an
+# environment variable — this keeps the default release profile portable
+# (x86-64-v1 / aarch64 baseline) while giving operators a one-liner for
+# fleets with a known CPU floor:
+#
+#   RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release
+#   RUSTFLAGS="-C target-cpu=native"    cargo build --release
+#
+# See README.md § "Build matrix" for the full tradeoff. Profile-level
+# rustflags (stable since Rust 1.79) are deliberately not used so the
+# current MSRV (1.75) stays valid.
 
 [profile.bench]
 lto = "thin"

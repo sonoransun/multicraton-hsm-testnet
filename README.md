@@ -538,6 +538,34 @@ cargo build --release --features "advanced-all"
 cargo test -- --test-threads=1
 ```
 
+### Build matrix — CPU targeting
+
+The default `release` profile is portable: it builds against the x86-64-v1
+baseline (and aarch64 baseline) so the shipped `libcraton_hsm.so` runs on
+RHEL 8, older EC2 instance families, and bare-metal fleets without
+surprise `SIGILL`s. The crypto primitives (`aes`, `sha2` with `asm`, `blake3`
+with `rayon`) already dispatch to ISA extensions (AES-NI, SHA-NI, AVX2) at
+runtime via `cpufeatures`, so a portable build does **not** forfeit
+hardware acceleration on capable CPUs — it only forfeits LLVM's ability
+to inline SIMD into non-crypto hot paths.
+
+For private fleets with a known CPU floor, tune the build via `RUSTFLAGS`:
+
+```bash
+# x86-64-v3: Haswell+ / Zen2+ baseline (AVX2, BMI2, FMA, MOVBE)
+RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release
+
+# x86-64-v4: Skylake-X+ / Zen4+ baseline (AVX-512)
+RUSTFLAGS="-C target-cpu=x86-64-v4" cargo build --release
+
+# Native — maximum tuning for the build host (not portable!)
+RUSTFLAGS="-C target-cpu=native" cargo build --release
+```
+
+Tuned builds are **not** produced by CI or release automation — they are
+explicit operator opt-ins. Do not distribute tuned binaries to hardware you
+do not control.
+
 ### Container deployment
 
 ```bash

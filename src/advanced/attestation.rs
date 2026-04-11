@@ -263,8 +263,7 @@ pub fn sev_snp_get_report(nonce: &[u8]) -> Result<Vec<u8>, HsmError> {
 /// Requires `/dev/nsm` (available inside AWS Nitro Enclaves).
 #[cfg(target_os = "linux")]
 pub fn nitro_get_attestation(nonce: &[u8]) -> Result<Vec<u8>, HsmError> {
-    use std::fs::{File, OpenOptions};
-    use std::io::{Read, Write};
+    use std::fs::OpenOptions;
     use std::os::unix::io::AsRawFd;
 
     // NSM IOCTL for attestation
@@ -273,15 +272,12 @@ pub fn nitro_get_attestation(nonce: &[u8]) -> Result<Vec<u8>, HsmError> {
     // The NSM accepts a CBOR-encoded request: {0: user_data, 1: nonce, 2: public_key}
     // We use the nonce as user_data for simplicity.
     // In production, include the HSM's ephemeral public key for key attestation.
-    let cbor_request = serde_cbor::to_vec(&serde_cbor::Value::Map({
-        let mut m = std::collections::BTreeMap::new();
-        m.insert(
-            serde_cbor::Value::Integer(0),
-            serde_cbor::Value::Bytes(nonce.to_vec()),
-        );
-        m
-    }))
-    .map_err(|_| HsmError::GeneralError)?;
+    let cbor_value = ciborium::value::Value::Map(vec![(
+        ciborium::value::Value::Integer(0i64.into()),
+        ciborium::value::Value::Bytes(nonce.to_vec()),
+    )]);
+    let mut cbor_request: Vec<u8> = Vec::new();
+    ciborium::into_writer(&cbor_value, &mut cbor_request).map_err(|_| HsmError::GeneralError)?;
 
     #[repr(C)]
     struct NsmIoctlRequest {

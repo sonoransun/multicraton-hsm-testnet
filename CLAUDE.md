@@ -17,9 +17,18 @@ This is a Cargo workspace with the following crates:
 - **tools/craton-hsm-admin**: CLI for token management, PIN operations, diagnostics
 - **tools/pkcs11-spy**: PKCS#11 spy/logging wrapper for debugging
 
+Non-crate directories worth knowing about:
+
+- **`docs/`**: 20+ detailed design documents. For deep dives, see `architecture.md`, `fork-safety.md`, `security-model.md`, `fips-gap-analysis.md`, and `operator-runbook.md`.
+- **`kreya/`**: Kreya gRPC collections (`CratonHSM-gRPC.krproj` + envs) for manual daemon testing.
+- **`deploy/`**: `Dockerfile`, `docker-compose.cluster.yml`, Helm chart, and `gen-test-certs.sh` for local mTLS setup.
+- **`fuzz/`**: 12 cargo-fuzz targets in `fuzz/fuzz_targets/`.
+
 MSRV: Rust 1.75 (`rust-version` in Cargo.toml). Toolchain pinned to stable via `rust-toolchain.toml`.
 
 ## Build Commands
+
+**Prerequisites**: `protoc` is required for `craton-hsm-daemon` (gRPC codegen). `libtss2-dev` is required when building the `tpm-binding` feature. The core library builds without either.
 
 ```bash
 # Debug build (core library only)
@@ -41,7 +50,7 @@ Library output: `target/release/libcraton_hsm.{so,dylib,dll}` (cdylib) and rlib.
 
 ## Testing
 
-**Critical**: All tests MUST run single-threaded by default due to global PKCS#11 state. The C ABI layer holds a single `static HSM: parking_lot::Mutex<Option<Arc<HsmCore>>>` in `src/pkcs11_abi/functions.rs` — only one `C_Initialize`/`C_Finalize` lifecycle per process.
+> **⚠ Default to `cargo test -- --test-threads=1`.** The C ABI holds a single global `static HSM: parking_lot::Mutex<Option<Arc<HsmCore>>>` in `src/pkcs11_abi/functions.rs` — running PKCS#11 tests in parallel corrupts the one-per-process `C_Initialize`/`C_Finalize` lifecycle. Only the explicitly-listed parallel-safe tests below may use higher `--test-threads`.
 
 ```bash
 # Full test suite (safe default)
@@ -95,7 +104,7 @@ Note: `deny.toml` ignores `RUSTSEC-2023-0071` (RSA Marvin Attack) — no fix ava
 
 ### Local CI
 
-`scripts/ci-local.sh` mirrors GitHub Actions CI locally:
+Two scripts exist in `scripts/` and both mirror GitHub Actions CI. **Prefer `ci-local.sh`** — it's the richer of the two and has a `quick` subcommand for the everyday feedback loop:
 
 ```bash
 ./scripts/ci-local.sh              # Run all jobs
@@ -103,13 +112,15 @@ Note: `deny.toml` ignores `RUSTSEC-2023-0071` (RSA Marvin Attack) — no fix ava
 ./scripts/ci-local.sh test         # Build & test only
 ```
 
-Also supports: `fmt`, `clippy`, `audit`, `miri`, `docs`, `coverage`, `semver`.
+`ci-local.sh` also supports: `fmt`, `clippy`, `audit`, `miri`, `docs`, `coverage`, `semver`.
+
+`scripts/local-ci.sh` is a parallel implementation that covers the same jobs minus `quick`/`coverage` but adds `bench`. Use it only if you specifically need `bench` as part of the CI sweep.
 
 ## Architecture
 
 ### Global State and Request Flow
 
-The C ABI entrypoint is `src/pkcs11_abi/functions.rs`, which exports ~68 `#[no_mangle]` PKCS#11 functions. These all access the global `static HSM` (a `Mutex<Option<Arc<HsmCore>>>`) with a thread-local cache (`CACHED_HSM`) indexed by generation counter for fast-path access. Fork detection (`INIT_PID`) reinitializes state to prevent key material leakage in child processes.
+The C ABI entrypoint is `src/pkcs11_abi/functions.rs`, which exports ~68 `#[no_mangle]` PKCS#11 functions. These all access the global `static HSM` (a `Mutex<Option<Arc<HsmCore>>>`) with a thread-local cache (`CACHED_HSM`) for fast-path access. A generation counter is bumped on every `C_Initialize`/`C_Finalize` (and on fork recovery) so stale thread-local caches are detected and invalidated — threads compare their cached generation against the global one before using the cached `Arc`. Fork detection (`INIT_PID`) reinitializes state to prevent key material leakage in child processes.
 
 ### Core Components
 
@@ -188,8 +199,9 @@ All internal errors use the `HsmError` enum (`src/error.rs`), which maps to PKCS
 
 ## Disabled and Placeholder Modules
 
-- **`src/advanced/`**: Feature-gated. `zkp`, `threshold`, `gpu_crypto`, `analytics`, `policy` are placeholder implementations. Fully implemented: `fhe.rs`, `tpm.rs`, `stark.rs`, `wasm_plugin.rs`, `attestation.rs` (always compiled).
-- **`src/crypto/enhanced_backend.rs`** and **`enhanced_rustcrypto_backend.rs`**: Currently disabled.
+- **`src/advanced/`**: Feature-gated. `zkp`, `threshold`, `gpu_crypto`, `analytics`, `policy` are placeholder implementations. Fully implemented: `fhe.rs`, `tpm.rs`, `stark.rs`, `wasm_plugin.rs`, `attestation.rs` (compiled whenever the `advanced` module is active).
+
+Note: `attestation.rs` uses `ciborium` (not the unmaintained `serde_cbor`) for CBOR framing of AWS Nitro NSM requests. `tpm.rs` and `attestation.rs` expose substantive APIs (`tpm_seal`/`tpm_unseal` under PCR 0/2/7 policy, TDX/SEV-SNP/Nitro ioctl paths) but are **not yet wired into the HSM init path** — nothing in `HsmCore` currently calls them. Wiring them into the boot/self-test flow and into an optional `KekProvider` for the encrypted store is tracked as future work.
 
 ## Benchmarking
 
