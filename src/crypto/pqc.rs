@@ -14,7 +14,7 @@ use ml_kem::KeyExport;
 /// Routes all PQC randomness through the SP 800-90A HMAC_DRBG so that
 /// key generation benefits from continuous health testing and prediction
 /// resistance, matching the classical keygen path in `keygen.rs`.
-struct PqcDrbgRng {
+pub(crate) struct PqcDrbgRng {
     drbg: crate::crypto::drbg::HmacDrbg,
 }
 
@@ -74,7 +74,7 @@ impl rand_core_new::TryCryptoRng for PqcDrbgRng {}
 ///
 /// All PQC randomness is routed through the SP 800-90A DRBG for health
 /// testing and prediction resistance, rather than using OsRng directly.
-fn new_rng() -> HsmResult<PqcDrbgRng> {
+pub(crate) fn new_rng() -> HsmResult<PqcDrbgRng> {
     PqcDrbgRng::new()
 }
 
@@ -340,7 +340,76 @@ pub fn ml_dsa_verify(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlhDsaVariant {
     Sha2_128s,
+    Sha2_128f,
+    Sha2_192s,
+    Sha2_192f,
     Sha2_256s,
+    Sha2_256f,
+    Shake_128s,
+    Shake_128f,
+    Shake_192s,
+    Shake_192f,
+    Shake_256s,
+    Shake_256f,
+}
+
+/// Dispatch macro for the 12 SLH-DSA parameter sets. Expands to a `match` on
+/// `$variant` whose arms substitute the corresponding `slh_dsa` type. Using a
+/// macro keeps the 12 arms identical in structure — adding/removing a variant
+/// is one edit.
+macro_rules! slh_dsa_dispatch {
+    ($variant:expr, |$ty:ident| $body:expr) => {
+        match $variant {
+            SlhDsaVariant::Sha2_128s => {
+                type $ty = slh_dsa::Sha2_128s;
+                $body
+            }
+            SlhDsaVariant::Sha2_128f => {
+                type $ty = slh_dsa::Sha2_128f;
+                $body
+            }
+            SlhDsaVariant::Sha2_192s => {
+                type $ty = slh_dsa::Sha2_192s;
+                $body
+            }
+            SlhDsaVariant::Sha2_192f => {
+                type $ty = slh_dsa::Sha2_192f;
+                $body
+            }
+            SlhDsaVariant::Sha2_256s => {
+                type $ty = slh_dsa::Sha2_256s;
+                $body
+            }
+            SlhDsaVariant::Sha2_256f => {
+                type $ty = slh_dsa::Sha2_256f;
+                $body
+            }
+            SlhDsaVariant::Shake_128s => {
+                type $ty = slh_dsa::Shake128s;
+                $body
+            }
+            SlhDsaVariant::Shake_128f => {
+                type $ty = slh_dsa::Shake128f;
+                $body
+            }
+            SlhDsaVariant::Shake_192s => {
+                type $ty = slh_dsa::Shake192s;
+                $body
+            }
+            SlhDsaVariant::Shake_192f => {
+                type $ty = slh_dsa::Shake192f;
+                $body
+            }
+            SlhDsaVariant::Shake_256s => {
+                type $ty = slh_dsa::Shake256s;
+                $body
+            }
+            SlhDsaVariant::Shake_256f => {
+                type $ty = slh_dsa::Shake256f;
+                $body
+            }
+        }
+    };
 }
 
 /// Generate an SLH-DSA keypair. Returns (signing_key_bytes, verifying_key_bytes).
@@ -348,24 +417,14 @@ pub fn slh_dsa_keygen(variant: SlhDsaVariant) -> HsmResult<(RawKeyMaterial, Vec<
     use slh_dsa::signature::Keypair;
     let mut rng = new_rng()?;
 
-    match variant {
-        SlhDsaVariant::Sha2_128s => {
-            let sk = slh_dsa::SigningKey::<slh_dsa::Sha2_128s>::new(&mut rng);
-            let vk = sk.verifying_key();
-            Ok((
-                RawKeyMaterial::new(sk.to_bytes()[..].to_vec()),
-                vk.to_bytes()[..].to_vec(),
-            ))
-        }
-        SlhDsaVariant::Sha2_256s => {
-            let sk = slh_dsa::SigningKey::<slh_dsa::Sha2_256s>::new(&mut rng);
-            let vk = sk.verifying_key();
-            Ok((
-                RawKeyMaterial::new(sk.to_bytes()[..].to_vec()),
-                vk.to_bytes()[..].to_vec(),
-            ))
-        }
-    }
+    slh_dsa_dispatch!(variant, |P| {
+        let sk = slh_dsa::SigningKey::<P>::new(&mut rng);
+        let vk = sk.verifying_key();
+        Ok((
+            RawKeyMaterial::new(sk.to_bytes()[..].to_vec()),
+            vk.to_bytes()[..].to_vec(),
+        ))
+    })
 }
 
 /// SLH-DSA sign a message (deterministic).
@@ -376,20 +435,12 @@ pub fn slh_dsa_sign(
 ) -> HsmResult<Vec<u8>> {
     use slh_dsa::signature::Signer;
 
-    match variant {
-        SlhDsaVariant::Sha2_128s => {
-            let sk = slh_dsa::SigningKey::<slh_dsa::Sha2_128s>::try_from(signing_key_bytes)
-                .map_err(|_| HsmError::KeyHandleInvalid)?;
-            let sig = sk.try_sign(data).map_err(|_| HsmError::GeneralError)?;
-            Ok(sig.to_bytes()[..].to_vec())
-        }
-        SlhDsaVariant::Sha2_256s => {
-            let sk = slh_dsa::SigningKey::<slh_dsa::Sha2_256s>::try_from(signing_key_bytes)
-                .map_err(|_| HsmError::KeyHandleInvalid)?;
-            let sig = sk.try_sign(data).map_err(|_| HsmError::GeneralError)?;
-            Ok(sig.to_bytes()[..].to_vec())
-        }
-    }
+    slh_dsa_dispatch!(variant, |P| {
+        let sk = slh_dsa::SigningKey::<P>::try_from(signing_key_bytes)
+            .map_err(|_| HsmError::KeyHandleInvalid)?;
+        let sig = sk.try_sign(data).map_err(|_| HsmError::GeneralError)?;
+        Ok(sig.to_bytes()[..].to_vec())
+    })
 }
 
 /// SLH-DSA verify a signature.
@@ -401,22 +452,13 @@ pub fn slh_dsa_verify(
 ) -> HsmResult<bool> {
     use slh_dsa::signature::Verifier;
 
-    match variant {
-        SlhDsaVariant::Sha2_128s => {
-            let vk = slh_dsa::VerifyingKey::<slh_dsa::Sha2_128s>::try_from(verifying_key_bytes)
-                .map_err(|_| HsmError::KeyHandleInvalid)?;
-            let sig = slh_dsa::Signature::<slh_dsa::Sha2_128s>::try_from(signature)
-                .map_err(|_| HsmError::SignatureInvalid)?;
-            Ok(vk.verify(data, &sig).is_ok())
-        }
-        SlhDsaVariant::Sha2_256s => {
-            let vk = slh_dsa::VerifyingKey::<slh_dsa::Sha2_256s>::try_from(verifying_key_bytes)
-                .map_err(|_| HsmError::KeyHandleInvalid)?;
-            let sig = slh_dsa::Signature::<slh_dsa::Sha2_256s>::try_from(signature)
-                .map_err(|_| HsmError::SignatureInvalid)?;
-            Ok(vk.verify(data, &sig).is_ok())
-        }
-    }
+    slh_dsa_dispatch!(variant, |P| {
+        let vk = slh_dsa::VerifyingKey::<P>::try_from(verifying_key_bytes)
+            .map_err(|_| HsmError::KeyHandleInvalid)?;
+        let sig = slh_dsa::Signature::<P>::try_from(signature)
+            .map_err(|_| HsmError::SignatureInvalid)?;
+        Ok(vk.verify(data, &sig).is_ok())
+    })
 }
 
 // ============================================================================
@@ -488,6 +530,72 @@ pub fn hybrid_verify(
     Ok(ml_valid & ec_valid)
 }
 
+// ----------------------------------------------------------------------------
+// Hybrid Ed25519 + ML-DSA-65 composite signatures
+// ----------------------------------------------------------------------------
+
+/// Hybrid Ed25519 + ML-DSA-65 signing.
+///
+/// Wire format matches the existing ECDSA-P256 hybrid for consistency:
+/// `[4-byte ML-DSA sig length (BE)] [ML-DSA-65 sig] [Ed25519 sig]`.
+///
+/// Ed25519 signatures are a fixed 64 bytes, but the length prefix scheme is
+/// retained so verify code can share parsing with other hybrid-sig variants.
+pub fn hybrid_ed25519_mldsa65_sign(
+    ml_dsa_sk_seed: &[u8],
+    ed25519_sk_bytes: &[u8],
+    data: &[u8],
+) -> HsmResult<Vec<u8>> {
+    let ml_sig = ml_dsa_sign(ml_dsa_sk_seed, data, MlDsaVariant::MlDsa65)?;
+    let ed_sig = crate::crypto::sign::ed25519_sign(ed25519_sk_bytes, data)?;
+
+    let ml_len = (ml_sig.len() as u32).to_be_bytes();
+    let mut combined = Vec::with_capacity(4 + ml_sig.len() + ed_sig.len());
+    combined.extend_from_slice(&ml_len);
+    combined.extend_from_slice(&ml_sig);
+    combined.extend_from_slice(&ed_sig);
+    Ok(combined)
+}
+
+/// Hybrid Ed25519 + ML-DSA-65 verification. Both must verify.
+///
+/// Runs both verifications unconditionally (even on parse failure) to avoid
+/// timing side-channels that would reveal which leg failed.
+pub fn hybrid_ed25519_mldsa65_verify(
+    ml_dsa_vk_bytes: &[u8],
+    ed25519_pk_bytes: &[u8],
+    data: &[u8],
+    combined_signature: &[u8],
+) -> HsmResult<bool> {
+    if combined_signature.len() < 4 {
+        return Err(HsmError::SignatureInvalid);
+    }
+
+    let ml_len = u32::from_be_bytes([
+        combined_signature[0],
+        combined_signature[1],
+        combined_signature[2],
+        combined_signature[3],
+    ]) as usize;
+    let total_ml = match 4usize.checked_add(ml_len) {
+        Some(v) => v,
+        None => return Err(HsmError::SignatureInvalid),
+    };
+    if combined_signature.len() < total_ml {
+        return Err(HsmError::SignatureInvalid);
+    }
+
+    let ml_sig = &combined_signature[4..total_ml];
+    let ed_sig = &combined_signature[total_ml..];
+
+    let ml_valid =
+        ml_dsa_verify(ml_dsa_vk_bytes, data, ml_sig, MlDsaVariant::MlDsa65).unwrap_or(false);
+    let ed_valid =
+        crate::crypto::sign::ed25519_verify(ed25519_pk_bytes, data, ed_sig).unwrap_or(false);
+
+    Ok(ml_valid & ed_valid)
+}
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -522,7 +630,17 @@ pub fn mechanism_to_slh_dsa_variant(
     use crate::pkcs11_abi::constants::*;
     match mechanism {
         CKM_SLH_DSA_SHA2_128S => Some(SlhDsaVariant::Sha2_128s),
+        CKM_SLH_DSA_SHA2_128F => Some(SlhDsaVariant::Sha2_128f),
+        CKM_SLH_DSA_SHA2_192S => Some(SlhDsaVariant::Sha2_192s),
+        CKM_SLH_DSA_SHA2_192F => Some(SlhDsaVariant::Sha2_192f),
         CKM_SLH_DSA_SHA2_256S => Some(SlhDsaVariant::Sha2_256s),
+        CKM_SLH_DSA_SHA2_256F => Some(SlhDsaVariant::Sha2_256f),
+        CKM_SLH_DSA_SHAKE_128S => Some(SlhDsaVariant::Shake_128s),
+        CKM_SLH_DSA_SHAKE_128F => Some(SlhDsaVariant::Shake_128f),
+        CKM_SLH_DSA_SHAKE_192S => Some(SlhDsaVariant::Shake_192s),
+        CKM_SLH_DSA_SHAKE_192F => Some(SlhDsaVariant::Shake_192f),
+        CKM_SLH_DSA_SHAKE_256S => Some(SlhDsaVariant::Shake_256s),
+        CKM_SLH_DSA_SHAKE_256F => Some(SlhDsaVariant::Shake_256f),
         _ => None,
     }
 }
@@ -541,4 +659,11 @@ pub fn is_slh_dsa_mechanism(mechanism: crate::pkcs11_abi::types::CK_MECHANISM_TY
 
 pub fn is_hybrid_mechanism(mechanism: crate::pkcs11_abi::types::CK_MECHANISM_TYPE) -> bool {
     mechanism == crate::pkcs11_abi::constants::CKM_HYBRID_ML_DSA_ECDSA
+}
+
+/// True for hybrid Ed25519 + ML-DSA-65 composite signature mechanism.
+pub fn is_hybrid_ed25519_mldsa65_mechanism(
+    mechanism: crate::pkcs11_abi::types::CK_MECHANISM_TYPE,
+) -> bool {
+    mechanism == crate::pkcs11_abi::constants::CKM_HYBRID_ED25519_MLDSA65
 }

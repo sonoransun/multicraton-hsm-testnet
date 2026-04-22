@@ -99,7 +99,7 @@ lib.load("/path/to/libcraton_hsm.so")
 | `C_GetSlotList` | Enumerate available slots |
 | `C_GetSlotInfo` | Query slot properties |
 | `C_GetTokenInfo` | Query token label, serial, flags, capabilities |
-| `C_GetMechanismList` | List supported mechanisms (41 mechanisms) |
+| `C_GetMechanismList` | List supported mechanisms (41 default, up to 60+ with PQC feature flags) |
 | `C_GetMechanismInfo` | Query min/max key size, supported operations |
 | `C_InitToken` | Initialize token with SO PIN and label |
 
@@ -140,7 +140,7 @@ lib.load("/path/to/libcraton_hsm.so")
 | Function | Description |
 |----------|-------------|
 | `C_GenerateKey` | Generate symmetric key (AES, HMAC, generic secret) |
-| `C_GenerateKeyPair` | Generate asymmetric key pair (RSA, EC, Ed25519, ML-DSA, SLH-DSA) |
+| `C_GenerateKeyPair` | Generate asymmetric key pair (RSA, EC, Ed25519, ML-KEM, ML-DSA, SLH-DSA ×12, Falcon, FrodoKEM, composite hybrid) |
 
 #### Signing and Verification
 
@@ -207,7 +207,9 @@ lib.load("/path/to/libcraton_hsm.so")
 
 ### Supported Mechanisms
 
-41 PKCS#11 mechanisms registered via `C_GetMechanismList`:
+The mechanism list reported by `C_GetMechanismList` is filtered at runtime by (a) compile-time feature flags and (b) the `[algorithms]` policy section in `craton_hsm.toml` (`enable_pqc`, `fips_approved_only`).
+
+**Classical (always compiled):**
 
 | Category | Mechanisms |
 |----------|-----------|
@@ -216,7 +218,25 @@ lib.load("/path/to/libcraton_hsm.so")
 | EdDSA (1) | `CKM_EDDSA` |
 | AES (7) | `CKM_AES_KEY_GEN`, `CKM_AES_GCM`, `CKM_AES_CBC`, `CKM_AES_CBC_PAD`, `CKM_AES_CTR`, `CKM_AES_KEY_WRAP`, `CKM_AES_KEY_WRAP_PAD` |
 | Digest (7) | `CKM_SHA_1`, `CKM_SHA256`, `CKM_SHA384`, `CKM_SHA512`, `CKM_SHA3_256`, `CKM_SHA3_384`, `CKM_SHA3_512` |
-| PQC (9) | `CKM_ML_KEM_512`, `CKM_ML_KEM_768`, `CKM_ML_KEM_1024`, `CKM_ML_DSA_44`, `CKM_ML_DSA_65`, `CKM_ML_DSA_87`, `CKM_SLH_DSA_SHA2_128S`, `CKM_SLH_DSA_SHA2_256S`, `CKM_HYBRID_X25519_ML_KEM_768` |
+
+**Post-quantum — default (pure Rust, 20 mechanisms):**
+
+| Category | Mechanisms |
+|----------|-----------|
+| ML-KEM (3) | `CKM_ML_KEM_512`, `CKM_ML_KEM_768`, `CKM_ML_KEM_1024` |
+| ML-DSA (3) | `CKM_ML_DSA_44`, `CKM_ML_DSA_65`, `CKM_ML_DSA_87` |
+| SLH-DSA (12) | `CKM_SLH_DSA_SHA2_128S/F`, `CKM_SLH_DSA_SHA2_192S/F`, `CKM_SLH_DSA_SHA2_256S/F`, `CKM_SLH_DSA_SHAKE_128S/F`, `CKM_SLH_DSA_SHAKE_192S/F`, `CKM_SLH_DSA_SHAKE_256S/F` |
+| Composite signature (2) | `CKM_HYBRID_ML_DSA_ECDSA` (ECDSA-P256+ML-DSA-65), `CKM_HYBRID_ED25519_MLDSA65` |
+
+**Post-quantum — feature-gated:**
+
+| Feature | Mechanisms |
+|---------|-----------|
+| `falcon-sig` | `CKM_FALCON_512`, `CKM_FALCON_1024` |
+| `frodokem-kem` | `CKM_FRODO_KEM_640_AES`, `CKM_FRODO_KEM_976_AES`, `CKM_FRODO_KEM_1344_AES` |
+| `hybrid-kem` | `CKM_HYBRID_X25519_MLKEM1024`, `CKM_HYBRID_P256_MLKEM768` (CNSA 2.0), `CKM_HYBRID_P384_MLKEM1024` (TOP SECRET) |
+
+All PQC mechanism constants live in the PKCS#11 vendor-defined range (`0x80000000–`). They are considered non-FIPS and are excluded when `[algorithms] fips_approved_only = true`. See [`post-quantum-crypto.md`](post-quantum-crypto.md) for key-type (`CKK_*`) constants, byte-layout contracts, and worked examples.
 
 ## Rust Library API
 
@@ -280,7 +300,10 @@ Sub-modules:
 - `crypto::digest` — hashing (SHA-1/2/3)
 - `crypto::derive` — key derivation (ECDH with internal HKDF-SHA256)
 - `crypto::wrap` — key wrapping (AES-KW, RFC 3394)
-- `crypto::pqc` — post-quantum (ML-KEM, ML-DSA, SLH-DSA)
+- `crypto::pqc` — ML-KEM, ML-DSA, SLH-DSA (12 parameter sets), composite hybrid signatures
+- `crypto::falcon` — Falcon-512/1024 (feature `falcon-sig`)
+- `crypto::frodokem` — FrodoKEM-640/976/1344-AES (feature `frodokem-kem`)
+- `crypto::hybrid_kem` / `crypto::hybrid` — 4 hybrid KEM constructions (feature `hybrid-kem`)
 - `crypto::drbg` — SP 800-90A HMAC_DRBG
 - `crypto::self_test` — power-on self-tests
 - `crypto::pairwise_test` — pairwise consistency tests

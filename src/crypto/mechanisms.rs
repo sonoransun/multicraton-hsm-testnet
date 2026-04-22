@@ -6,7 +6,8 @@ use crate::pkcs11_abi::types::{CK_MECHANISM_TYPE, CK_RV};
 
 /// Check if a mechanism is supported for signing
 pub fn is_sign_mechanism(mechanism: CK_MECHANISM_TYPE) -> bool {
-    matches!(
+    // Classical + ML-DSA + hybrid composites.
+    let core = matches!(
         mechanism,
         CKM_RSA_PKCS
             | CKM_SHA256_RSA_PKCS
@@ -25,9 +26,28 @@ pub fn is_sign_mechanism(mechanism: CK_MECHANISM_TYPE) -> bool {
             | CKM_ML_DSA_65
             | CKM_ML_DSA_87
             | CKM_SLH_DSA_SHA2_128S
+            | CKM_SLH_DSA_SHA2_128F
+            | CKM_SLH_DSA_SHA2_192S
+            | CKM_SLH_DSA_SHA2_192F
             | CKM_SLH_DSA_SHA2_256S
+            | CKM_SLH_DSA_SHA2_256F
+            | CKM_SLH_DSA_SHAKE_128S
+            | CKM_SLH_DSA_SHAKE_128F
+            | CKM_SLH_DSA_SHAKE_192S
+            | CKM_SLH_DSA_SHAKE_192F
+            | CKM_SLH_DSA_SHAKE_256S
+            | CKM_SLH_DSA_SHAKE_256F
             | CKM_HYBRID_ML_DSA_ECDSA
-    )
+            | CKM_HYBRID_ED25519_MLDSA65
+    );
+    if core {
+        return true;
+    }
+    #[cfg(feature = "falcon-sig")]
+    if matches!(mechanism, CKM_FALCON_512 | CKM_FALCON_1024) {
+        return true;
+    }
+    false
 }
 
 /// Check if a mechanism is supported for encryption
@@ -45,7 +65,7 @@ pub fn is_keygen_mechanism(mechanism: CK_MECHANISM_TYPE) -> bool {
 
 /// Check if a mechanism is supported for key pair generation
 pub fn is_keypair_gen_mechanism(mechanism: CK_MECHANISM_TYPE) -> bool {
-    matches!(
+    let core = matches!(
         mechanism,
         CKM_RSA_PKCS_KEY_PAIR_GEN
             | CKM_EC_KEY_PAIR_GEN
@@ -57,13 +77,63 @@ pub fn is_keypair_gen_mechanism(mechanism: CK_MECHANISM_TYPE) -> bool {
             | CKM_ML_DSA_65
             | CKM_ML_DSA_87
             | CKM_SLH_DSA_SHA2_128S
+            | CKM_SLH_DSA_SHA2_128F
+            | CKM_SLH_DSA_SHA2_192S
+            | CKM_SLH_DSA_SHA2_192F
             | CKM_SLH_DSA_SHA2_256S
-    )
+            | CKM_SLH_DSA_SHA2_256F
+            | CKM_SLH_DSA_SHAKE_128S
+            | CKM_SLH_DSA_SHAKE_128F
+            | CKM_SLH_DSA_SHAKE_192S
+            | CKM_SLH_DSA_SHAKE_192F
+            | CKM_SLH_DSA_SHAKE_256S
+            | CKM_SLH_DSA_SHAKE_256F
+            | CKM_HYBRID_ED25519_MLDSA65
+    );
+    if core {
+        return true;
+    }
+    #[cfg(feature = "falcon-sig")]
+    if matches!(mechanism, CKM_FALCON_512 | CKM_FALCON_1024) {
+        return true;
+    }
+    #[cfg(feature = "frodokem-kem")]
+    if matches!(
+        mechanism,
+        CKM_FRODO_KEM_640_AES | CKM_FRODO_KEM_976_AES | CKM_FRODO_KEM_1344_AES
+    ) {
+        return true;
+    }
+    #[cfg(feature = "hybrid-kem")]
+    if matches!(
+        mechanism,
+        CKM_HYBRID_X25519_MLKEM1024 | CKM_HYBRID_P256_MLKEM768 | CKM_HYBRID_P384_MLKEM1024
+    ) {
+        return true;
+    }
+    false
 }
 
 /// Check if a mechanism is a KEM (Key Encapsulation) mechanism
 pub fn is_kem_mechanism(mechanism: CK_MECHANISM_TYPE) -> bool {
-    matches!(mechanism, CKM_ML_KEM_512 | CKM_ML_KEM_768 | CKM_ML_KEM_1024)
+    if matches!(mechanism, CKM_ML_KEM_512 | CKM_ML_KEM_768 | CKM_ML_KEM_1024) {
+        return true;
+    }
+    #[cfg(feature = "frodokem-kem")]
+    if matches!(
+        mechanism,
+        CKM_FRODO_KEM_640_AES | CKM_FRODO_KEM_976_AES | CKM_FRODO_KEM_1344_AES
+    ) {
+        return true;
+    }
+    #[cfg(feature = "hybrid-kem")]
+    if matches!(
+        mechanism,
+        CKM_HYBRID_X25519_MLKEM1024 | CKM_HYBRID_P256_MLKEM768 | CKM_HYBRID_P384_MLKEM1024
+    ) {
+        return true;
+    }
+    false
 }
 
 /// Check if a mechanism is supported for digest
@@ -137,9 +207,37 @@ pub fn supported_mechanisms() -> Vec<CK_MECHANISM_TYPE> {
         CKM_ML_DSA_44,
         CKM_ML_DSA_65,
         CKM_ML_DSA_87,
+        // SLH-DSA — all 12 FIPS 205 parameter sets
         CKM_SLH_DSA_SHA2_128S,
+        CKM_SLH_DSA_SHA2_128F,
+        CKM_SLH_DSA_SHA2_192S,
+        CKM_SLH_DSA_SHA2_192F,
         CKM_SLH_DSA_SHA2_256S,
+        CKM_SLH_DSA_SHA2_256F,
+        CKM_SLH_DSA_SHAKE_128S,
+        CKM_SLH_DSA_SHAKE_128F,
+        CKM_SLH_DSA_SHAKE_192S,
+        CKM_SLH_DSA_SHAKE_192F,
+        CKM_SLH_DSA_SHAKE_256S,
+        CKM_SLH_DSA_SHAKE_256F,
         CKM_HYBRID_ML_DSA_ECDSA,
+        CKM_HYBRID_ED25519_MLDSA65,
+        #[cfg(feature = "falcon-sig")]
+        CKM_FALCON_512,
+        #[cfg(feature = "falcon-sig")]
+        CKM_FALCON_1024,
+        #[cfg(feature = "frodokem-kem")]
+        CKM_FRODO_KEM_640_AES,
+        #[cfg(feature = "frodokem-kem")]
+        CKM_FRODO_KEM_976_AES,
+        #[cfg(feature = "frodokem-kem")]
+        CKM_FRODO_KEM_1344_AES,
+        #[cfg(feature = "hybrid-kem")]
+        CKM_HYBRID_X25519_MLKEM1024,
+        #[cfg(feature = "hybrid-kem")]
+        CKM_HYBRID_P256_MLKEM768,
+        #[cfg(feature = "hybrid-kem")]
+        CKM_HYBRID_P384_MLKEM1024,
     ]
 }
 
@@ -207,7 +305,7 @@ pub fn is_fips_approved(mechanism: CK_MECHANISM_TYPE) -> bool {
 
 /// Check if a mechanism is a PQC (Post-Quantum Cryptography) mechanism.
 fn is_pqc_mechanism(mechanism: CK_MECHANISM_TYPE) -> bool {
-    matches!(
+    let core = matches!(
         mechanism,
         CKM_ML_KEM_512
             | CKM_ML_KEM_768
@@ -216,9 +314,42 @@ fn is_pqc_mechanism(mechanism: CK_MECHANISM_TYPE) -> bool {
             | CKM_ML_DSA_65
             | CKM_ML_DSA_87
             | CKM_SLH_DSA_SHA2_128S
+            | CKM_SLH_DSA_SHA2_128F
+            | CKM_SLH_DSA_SHA2_192S
+            | CKM_SLH_DSA_SHA2_192F
             | CKM_SLH_DSA_SHA2_256S
+            | CKM_SLH_DSA_SHA2_256F
+            | CKM_SLH_DSA_SHAKE_128S
+            | CKM_SLH_DSA_SHAKE_128F
+            | CKM_SLH_DSA_SHAKE_192S
+            | CKM_SLH_DSA_SHAKE_192F
+            | CKM_SLH_DSA_SHAKE_256S
+            | CKM_SLH_DSA_SHAKE_256F
             | CKM_HYBRID_ML_DSA_ECDSA
-    )
+            | CKM_HYBRID_ED25519_MLDSA65
+    );
+    if core {
+        return true;
+    }
+    #[cfg(feature = "falcon-sig")]
+    if matches!(mechanism, CKM_FALCON_512 | CKM_FALCON_1024) {
+        return true;
+    }
+    #[cfg(feature = "frodokem-kem")]
+    if matches!(
+        mechanism,
+        CKM_FRODO_KEM_640_AES | CKM_FRODO_KEM_976_AES | CKM_FRODO_KEM_1344_AES
+    ) {
+        return true;
+    }
+    #[cfg(feature = "hybrid-kem")]
+    if matches!(
+        mechanism,
+        CKM_HYBRID_X25519_MLKEM1024 | CKM_HYBRID_P256_MLKEM768 | CKM_HYBRID_P384_MLKEM1024
+    ) {
+        return true;
+    }
+    false
 }
 
 /// Validate a mechanism against the algorithm policy configuration.

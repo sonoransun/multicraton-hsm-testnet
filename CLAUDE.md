@@ -28,7 +28,7 @@ MSRV: Rust 1.75 (`rust-version` in Cargo.toml). Toolchain pinned to stable via `
 
 ## Build Commands
 
-**Prerequisites**: `protoc` is required for `craton-hsm-daemon` (gRPC codegen). `libtss2-dev` is required when building the `tpm-binding` feature. The core library builds without either.
+**Prerequisites**: `protoc` is required for `craton-hsm-daemon` (gRPC codegen). `libtss2-dev` is required when building the `tpm-binding` feature. A C compiler (plus headers) is required when building `falcon-sig` or `frodokem-kem` — those pull in `pqcrypto-falcon` / `pqcrypto-frodo`, which compile PQClean reference C. The default core library builds without any of these.
 
 ```bash
 # Debug build (core library only)
@@ -166,13 +166,15 @@ Two backends via the `CryptoBackend` trait (covers classical crypto only; PQC ha
 | `rustcrypto-backend` | yes | Pure Rust crypto backend |
 | `awslc-backend` | — | FIPS 140-3 validated AWS-LC backend |
 | `fips` | — | FIPS-only mode |
-| `quantum-resistant` | — | ML-KEM, ML-DSA, SLH-DSA |
+| `quantum-resistant` | — | Marker flag — ML-KEM, ML-DSA, SLH-DSA (all 12 FIPS 205 parameter sets) are unconditionally compiled |
+| `falcon-sig` | — | Falcon-512/1024 signatures via `pqcrypto-falcon` (C FFI, needs C compiler) |
+| `frodokem-kem` | — | FrodoKEM-640/976/1344-AES via `pqcrypto-frodo` (C FFI, needs C compiler) |
 | `wrapped-keys` | — | Key import/export (JSON, PKCS#8, PKCS#12) |
 | `observability` | — | Prometheus metrics + HTTP server |
 | `enterprise` | — | `wrapped-keys` + `observability` |
 | `networking` | — | Enables `cluster` module (Raft, mTLS, transport) |
 | `blake3-hash` | — | BLAKE3 parallel tree-hashing |
-| `hybrid-kem` | — | X25519 + ML-KEM-768 dual KEM |
+| `hybrid-kem` | — | 4 hybrid KEM constructions: X25519+ML-KEM-768/1024, P-256+ML-KEM-768 (CNSA 2.0), P-384+ML-KEM-1024 (TOP SECRET). HKDF-SHA-256 combiner with per-scheme domain-separation labels. |
 | `chacha20-aead` | — | ChaCha20-Poly1305 / XChaCha20 AEAD |
 | `argon2-kdf` | — | Argon2id memory-hard KDF |
 | `bls-signatures` | — | BLS12-381 aggregatable signatures |

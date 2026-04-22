@@ -55,6 +55,11 @@ pub fn run_post() -> HsmResult<()> {
     // PQC KATs
     post_ml_dsa_kat()?;
     post_ml_kem_kat()?;
+    post_slh_dsa_fast_kat()?;
+    #[cfg(feature = "falcon-sig")]
+    post_falcon_kat()?;
+    #[cfg(feature = "frodokem-kem")]
+    post_frodokem_kat()?;
 
     // RNG health + continuous test
     post_rng_health()?;
@@ -399,6 +404,54 @@ fn post_ml_kem_kat() -> HsmResult<()> {
     use subtle::ConstantTimeEq;
     let secrets_match: bool = shared_secret_enc.ct_eq(&shared_secret_dec).into();
     if !secrets_match {
+        return Err(crate::error::HsmError::GeneralError);
+    }
+    Ok(())
+}
+
+/// SLH-DSA-SHA2-128f sign/verify roundtrip. Validates the fast-variant path
+/// that was added alongside the slow (`s`) variants in the v0.9 expansion.
+fn post_slh_dsa_fast_kat() -> HsmResult<()> {
+    use crate::crypto::pqc;
+    let (sk, vk) = pqc::slh_dsa_keygen(pqc::SlhDsaVariant::Sha2_128f)?;
+    let message = b"FIPS POST SLH-DSA-SHA2-128f self-test";
+    let signature = pqc::slh_dsa_sign(sk.as_bytes(), message, pqc::SlhDsaVariant::Sha2_128f)?;
+    let valid = pqc::slh_dsa_verify(&vk, message, &signature, pqc::SlhDsaVariant::Sha2_128f)?;
+    if !valid {
+        return Err(crate::error::HsmError::GeneralError);
+    }
+    Ok(())
+}
+
+/// Falcon-512 sign/verify roundtrip. Only runs when the `falcon-sig` feature
+/// is enabled (C FFI via pqcrypto-falcon).
+#[cfg(feature = "falcon-sig")]
+fn post_falcon_kat() -> HsmResult<()> {
+    use crate::crypto::falcon;
+    let (sk, pk) = falcon::falcon_keygen(falcon::FalconVariant::Falcon512)?;
+    let message = b"FIPS POST Falcon-512 self-test";
+    let signature = falcon::falcon_sign(sk.as_bytes(), message, falcon::FalconVariant::Falcon512)?;
+    let valid = falcon::falcon_verify(&pk, message, &signature, falcon::FalconVariant::Falcon512)?;
+    if !valid {
+        return Err(crate::error::HsmError::GeneralError);
+    }
+    Ok(())
+}
+
+/// FrodoKEM-640-AES encap/decap roundtrip. Gated by `frodokem-kem` feature.
+#[cfg(feature = "frodokem-kem")]
+fn post_frodokem_kat() -> HsmResult<()> {
+    use crate::crypto::frodokem;
+    let (sk, pk) = frodokem::frodo_keygen(frodokem::FrodoVariant::Frodo640Aes)?;
+    let (ct, ss_a) = frodokem::frodo_encapsulate(&pk, frodokem::FrodoVariant::Frodo640Aes)?;
+    let ss_b = frodokem::frodo_decapsulate(
+        sk.as_bytes(),
+        &ct,
+        frodokem::FrodoVariant::Frodo640Aes,
+    )?;
+    use subtle::ConstantTimeEq;
+    let ok: bool = ss_a.ct_eq(&ss_b).into();
+    if !ok {
         return Err(crate::error::HsmError::GeneralError);
     }
     Ok(())

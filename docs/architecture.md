@@ -32,7 +32,7 @@ graph TB
         SESSION["session/<br/><i>state machine, DashMap</i>"]
         TOKEN["token/<br/><i>PIN auth, PBKDF2, lockout</i>"]
         STORE["store/<br/><i>EncryptedStore, redb</i>"]
-        CRYPTO["crypto/<br/><i>keygen, sign, encrypt,<br/>digest, PQC, DRBG,<br/>self-test, mlock</i>"]
+        CRYPTO["crypto/<br/><i>keygen, sign, encrypt, digest,<br/>PQC (ML-KEM/DSA, SLH-DSA,<br/>Falcon, FrodoKEM, hybrid),<br/>DRBG, self-test, mlock</i>"]
         AUDIT["audit/<br/><i>append-only,<br/>chained SHA-256</i>"]
     end
 
@@ -70,7 +70,7 @@ graph LR
     SRC --> SESS["session/<br/><i>state machine, DashMap manager</i>"]
     SRC --> TOK["token/<br/><i>PIN hashing, lockout, slots</i>"]
     SRC --> STORE["store/<br/><i>objects, encrypted redb,<br/>backup, key_material</i>"]
-    SRC --> CRYPTO["crypto/<br/><i>keygen, sign, encrypt, digest,<br/>derive, wrap, PQC, DRBG,<br/>self_test, mlock, backends</i>"]
+    SRC --> CRYPTO["crypto/<br/><i>keygen, sign, encrypt, digest,<br/>derive, wrap, DRBG,<br/>pqc (ML-KEM/DSA, SLH-DSA × 12),<br/>falcon, frodokem, hybrid*, hybrid_kem,<br/>self_test, mlock, backends</i>"]
     SRC --> CFG["config/<br/><i>TOML config + defaults</i>"]
     SRC --> AUDIT["audit/<br/><i>append-only chained SHA-256</i>"]
 
@@ -192,7 +192,7 @@ SP 800-90A HMAC_DRBG using HMAC-SHA256:
 
 ### Crypto Engine (`src/crypto/`)
 
-41 mechanisms across 7 categories:
+60+ mechanisms across 8 categories (PQC counts vary by enabled features):
 
 | Category | Algorithms |
 |----------|-----------|
@@ -202,7 +202,50 @@ SP 800-90A HMAC_DRBG using HMAC-SHA256:
 | Digest | SHA-1, SHA-256, SHA-384, SHA-512, SHA3-256/384/512 |
 | Key derivation | ECDH (P-256, P-384) |
 | Key wrapping | AES Key Wrap (RFC 3394) |
-| Post-quantum | ML-DSA-44/65/87, ML-KEM-512/768/1024, SLH-DSA, hybrid |
+| Post-quantum (default) | ML-KEM-512/768/1024, ML-DSA-44/65/87, SLH-DSA (all 12 FIPS 205 parameter sets) |
+| Post-quantum (feature-gated) | Falcon-512/1024 (`falcon-sig`), FrodoKEM-640/976/1344-AES (`frodokem-kem`) |
+| Hybrid | X25519/P-256/P-384 + ML-KEM (`hybrid-kem`); ECDSA-P256+ML-DSA-65, Ed25519+ML-DSA-65 (default) |
+
+#### PQC module layout
+
+```mermaid
+graph TB
+    subgraph DEFAULT["Default build — pure Rust"]
+        direction TB
+        PQC["crypto/pqc.rs<br/><i>ML-KEM · ML-DSA · SLH-DSA ×12<br/>Ed25519+ML-DSA-65 composite<br/>ECDSA+ML-DSA-65 composite</i>"]
+        DRBG["crypto/drbg.rs<br/><i>HMAC_DRBG (SP 800-90A)</i>"]
+        PQC --> DRBG
+    end
+
+    subgraph HYBRID_FEAT["feature: hybrid-kem"]
+        direction TB
+        HKEM["crypto/hybrid_kem.rs<br/><i>X25519+ML-KEM-768 (original)</i>"]
+        HNEW["crypto/hybrid.rs<br/><i>X25519+ML-KEM-1024<br/>P-256+ML-KEM-768 (CNSA 2.0)<br/>P-384+ML-KEM-1024 (TOP SECRET)</i>"]
+    end
+
+    subgraph FALCON_FEAT["feature: falcon-sig"]
+        FAL["crypto/falcon.rs<br/><i>Falcon-512 · Falcon-1024<br/>via pqcrypto-falcon (C FFI)</i>"]
+    end
+
+    subgraph FRODO_FEAT["feature: frodokem-kem"]
+        FRO["crypto/frodokem.rs<br/><i>FrodoKEM-640/976/1344-AES<br/>via pqcrypto-frodo (C FFI)</i>"]
+    end
+
+    HKEM & HNEW --> DRBG
+    FAL -.->|"PQClean randombytes"| OSRNG[("OS entropy")]
+    FRO -.->|"PQClean randombytes"| OSRNG
+
+    classDef default_m fill:#4a2d7a,color:#fff
+    classDef hybrid_m fill:#1a6e2e,color:#fff
+    classDef ffi_m fill:#7a2d4a,color:#fff
+    classDef util fill:#2d4a7a,color:#fff
+    class PQC default_m
+    class HKEM,HNEW hybrid_m
+    class FAL,FRO ffi_m
+    class DRBG,OSRNG util
+```
+
+Pure-Rust PQC (FIPS 203/204/205) routes all key generation and ML-KEM encapsulation through the SP 800-90A HMAC_DRBG. Falcon and FrodoKEM delegate randomness to PQClean's internal `randombytes` because those crates expose no RNG-injection hook; this is documented as an upstream limitation in [`docs/future-work-guide.md`](future-work-guide.md).
 
 ### Audit Log (`src/audit/`)
 
@@ -239,6 +282,16 @@ Any modification, deletion, or reordering breaks the chain. Events are recorded 
 | 16 | HMAC_DRBG | Known Answer Test | NIST CAVP vector |
 
 If any test fails, `POST_FAILED` is set and all subsequent operations return `CKR_GENERAL_ERROR`. On re-initialization (after `C_Finalize`), `POST_FAILED` is reset and POST re-runs.
+
+Three additional PQC KATs run when their features are enabled (20 tests total with everything on):
+
+| Test | Feature | Vector Source |
+|------|---------|---------------|
+| SLH-DSA-SHA2-128f | default | Generated key (fast-variant coverage) |
+| Falcon-512 | `falcon-sig` | Generated key + detached sign/verify |
+| FrodoKEM-640-AES | `frodokem-kem` | Generated key + encap/decap constant-time compare |
+
+Pairwise consistency tests (FIPS 140-3 §9.6) run after every asymmetric keygen — including Falcon, FrodoKEM, all four hybrid KEM variants, and the composite Ed25519+ML-DSA-65 signature. Failure sets `POST_FAILED` just as with the boot-time KATs.
 
 ## Data Flow: Sign Operation
 
@@ -280,15 +333,22 @@ flowchart TD
     APP2 --> CU2 --> ROP
     ROP -->|no active op| E5["CKR_OPERATION_NOT_INITIALIZED"]
     ROP -->|active| LOAD --> DISP
-    DISP --> RSA & EC & ED & PQC
-    RSA & EC & ED & PQC --> WRITE --> ADTL --> CLR --> OK2
+    DISP --> RSA & EC & ED & PQC & FAL & HYB
+    RSA & EC & ED & PQC & FAL & HYB --> WRITE --> ADTL --> CLR --> OK2
+
+    FAL["CKM_FALCON_*<br/>→ falcon::falcon_sign()<br/><i>(feature-gated)</i>"]
+    HYB["CKM_HYBRID_*<br/>→ pqc::hybrid_*_sign()"]
 
     classDef error fill:#7a2d2d,color:#fff
     classDef success fill:#1a6e2e,color:#fff
     classDef crypto fill:#2d4a7a,color:#fff
+    classDef ffi fill:#7a2d4a,color:#fff
+    classDef hybrid fill:#1a6e2e,color:#fff
     class E1,E2,E3,E4,E5 error
     class OK1,OK2 success
     class RSA,EC,ED,PQC crypto
+    class FAL ffi
+    class HYB hybrid
 ```
 
 ## Concurrency Model
@@ -389,6 +449,35 @@ All classical cryptographic operations are routed through a **`CryptoBackend` tr
 2. **AwsLcBackend** (`src/crypto/awslc_backend.rs`) — Optional (`--features awslc-backend`). Uses AWS-LC (aws-lc-rs) with FIPS 140-3 validated cryptographic module.
 
 Backend selection is config-driven via `algorithms.crypto_backend` in `craton_hsm.toml` (`"rustcrypto"` or `"awslc"`). The backend is resolved at `C_Initialize` time. PQC operations remain direct calls to dedicated crates — no alternative PQC backends exist yet.
+
+### PQC dispatch in the signing path
+
+```mermaid
+flowchart TD
+    APP["C_Sign(hSession, data, sig)"]
+    DISP["sign_single_shot(mechanism, key_bytes, data, obj)"]
+
+    APP --> DISP
+    DISP -->|"is_ml_dsa_mechanism"| MLDSA["pqc::ml_dsa_sign(seed, data, variant)"]
+    DISP -->|"is_slh_dsa_mechanism"| SLH["pqc::slh_dsa_sign(sk, data, variant)<br/><i>macro-dispatched over 12 sets</i>"]
+    DISP -->|"is_hybrid_mechanism"| HYB1["pqc::hybrid_sign<br/>ML-DSA-65 + ECDSA-P256"]
+    DISP -->|"is_hybrid_ed25519_mldsa65_mechanism"| HYB2["pqc::hybrid_ed25519_mldsa65_sign<br/>Ed25519 + ML-DSA-65"]
+    DISP -->|"is_falcon_mechanism<br/>(feature = falcon-sig)"| FAL["falcon::falcon_sign(sk, data, variant)"]
+    DISP -->|"classical (RSA/EC/Ed)"| CLA["backend.rsa_* / ecdsa_* / ed25519_sign"]
+
+    MLDSA & SLH & HYB1 & HYB2 & FAL & CLA --> OUT["Vec<u8> signature bytes"]
+
+    classDef pqc fill:#4a2d7a,color:#fff
+    classDef hybrid fill:#1a6e2e,color:#fff
+    classDef ffi fill:#7a2d4a,color:#fff
+    classDef classical fill:#2d4a7a,color:#fff
+    class MLDSA,SLH pqc
+    class HYB1,HYB2 hybrid
+    class FAL ffi
+    class CLA classical
+```
+
+See [PQC deep-dive](post-quantum-crypto.md) for full byte layouts, RNG routing, pairwise-test coverage, and storage formats.
 
 ### Fork Safety
 

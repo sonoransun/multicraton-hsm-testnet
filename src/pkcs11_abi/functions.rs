@@ -774,17 +774,50 @@ pub extern "C" fn C_GetMechanismInfo(
                 max_key_size: 87 as CK_ULONG,
                 flags: CKF_GENERATE_KEY_PAIR_FLAG | CKF_SIGN_FLAG | CKF_VERIFY_FLAG,
             },
-            // Post-Quantum: SLH-DSA (Hash-Based Signatures)
-            CKM_SLH_DSA_SHA2_128S | CKM_SLH_DSA_SHA2_256S => CK_MECHANISM_INFO {
+            // Post-Quantum: SLH-DSA (Hash-Based Signatures) — all 12 FIPS 205 parameter sets
+            CKM_SLH_DSA_SHA2_128S
+            | CKM_SLH_DSA_SHA2_128F
+            | CKM_SLH_DSA_SHA2_192S
+            | CKM_SLH_DSA_SHA2_192F
+            | CKM_SLH_DSA_SHA2_256S
+            | CKM_SLH_DSA_SHA2_256F
+            | CKM_SLH_DSA_SHAKE_128S
+            | CKM_SLH_DSA_SHAKE_128F
+            | CKM_SLH_DSA_SHAKE_192S
+            | CKM_SLH_DSA_SHAKE_192F
+            | CKM_SLH_DSA_SHAKE_256S
+            | CKM_SLH_DSA_SHAKE_256F => CK_MECHANISM_INFO {
                 min_key_size: 128 as CK_ULONG,
                 max_key_size: 256 as CK_ULONG,
                 flags: CKF_GENERATE_KEY_PAIR_FLAG | CKF_SIGN_FLAG | CKF_VERIFY_FLAG,
             },
             // Hybrid ML-DSA + ECDSA
-            CKM_HYBRID_ML_DSA_ECDSA => CK_MECHANISM_INFO {
+            CKM_HYBRID_ML_DSA_ECDSA | CKM_HYBRID_ED25519_MLDSA65 => CK_MECHANISM_INFO {
                 min_key_size: 256 as CK_ULONG,
                 max_key_size: 256 as CK_ULONG,
-                flags: CKF_SIGN_FLAG | CKF_VERIFY_FLAG,
+                flags: CKF_SIGN_FLAG | CKF_VERIFY_FLAG | CKF_GENERATE_KEY_PAIR_FLAG,
+            },
+            // Falcon (FN-DSA) — FIPS 206 (draft)
+            CKM_FALCON_512 | CKM_FALCON_1024 => CK_MECHANISM_INFO {
+                min_key_size: 512 as CK_ULONG,
+                max_key_size: 1024 as CK_ULONG,
+                flags: CKF_GENERATE_KEY_PAIR_FLAG | CKF_SIGN_FLAG | CKF_VERIFY_FLAG,
+            },
+            // FrodoKEM — conservative-lattice KEM
+            CKM_FRODO_KEM_640_AES | CKM_FRODO_KEM_976_AES | CKM_FRODO_KEM_1344_AES => {
+                CK_MECHANISM_INFO {
+                    min_key_size: 640 as CK_ULONG,
+                    max_key_size: 1344 as CK_ULONG,
+                    flags: CKF_GENERATE_KEY_PAIR_FLAG | CKF_DERIVE_FLAG,
+                }
+            }
+            // Hybrid KEM constructions (classical + PQC)
+            CKM_HYBRID_X25519_MLKEM1024
+            | CKM_HYBRID_P256_MLKEM768
+            | CKM_HYBRID_P384_MLKEM1024 => CK_MECHANISM_INFO {
+                min_key_size: 256 as CK_ULONG,
+                max_key_size: 1024 as CK_ULONG,
+                flags: CKF_GENERATE_KEY_PAIR_FLAG | CKF_DERIVE_FLAG,
             },
             _ => return CKR_MECHANISM_INVALID,
         };
@@ -2303,7 +2336,17 @@ fn sign_single_shot(
             .map(|v| v.as_slice())
             .unwrap_or(&[]);
         pqc::hybrid_sign(key_bytes, ecdsa_key, data)
+    } else if pqc::is_hybrid_ed25519_mldsa65_mechanism(mechanism) {
+        // Composite secret key layout: [ed25519_sk_32][mldsa65_seed_32]
+        if key_bytes.len() < 64 {
+            return Err(HsmError::KeyHandleInvalid);
+        }
+        pqc::hybrid_ed25519_mldsa65_sign(&key_bytes[32..], &key_bytes[..32], data)
     } else {
+        #[cfg(feature = "falcon-sig")]
+        if let Some(v) = crate::crypto::falcon::mechanism_to_falcon_variant(mechanism) {
+            return crate::crypto::falcon::falcon_sign(key_bytes, data, v);
+        }
         // RSA PKCS#1 v1.5
         let hash_alg = sign::mechanism_to_hash(mechanism);
         backend.rsa_pkcs1v15_sign(key_bytes, data, hash_alg)
@@ -2401,7 +2444,25 @@ fn verify_single_shot(
             .map(|v| v.as_slice())
             .unwrap_or(&[]);
         pqc::hybrid_verify(ml_dsa_vk, ecdsa_pk, data, signature)
+    } else if pqc::is_hybrid_ed25519_mldsa65_mechanism(mechanism) {
+        // Composite public key layout: [ed25519_pk_32][mldsa65_vk]
+        let pub_key = obj
+            .public_key_data
+            .as_deref()
+            .ok_or(HsmError::KeyHandleInvalid)?;
+        if pub_key.len() < 32 {
+            return Err(HsmError::KeyHandleInvalid);
+        }
+        pqc::hybrid_ed25519_mldsa65_verify(&pub_key[32..], &pub_key[..32], data, signature)
     } else {
+        #[cfg(feature = "falcon-sig")]
+        if let Some(v) = crate::crypto::falcon::mechanism_to_falcon_variant(mechanism) {
+            let pub_key = obj
+                .public_key_data
+                .as_deref()
+                .ok_or(HsmError::KeyHandleInvalid)?;
+            return crate::crypto::falcon::falcon_verify(pub_key, data, signature, v);
+        }
         // RSA PKCS#1 v1.5
         let modulus = obj.modulus.as_deref().ok_or(HsmError::KeyHandleInvalid)?;
         let pub_exp = obj
@@ -2868,8 +2929,21 @@ pub extern "C" fn C_GenerateKeyPair(
             CKM_EDDSA => generate_ed25519_keypair(&hsm, &pub_template, &priv_template),
             m if pqc::is_ml_kem_mechanism(m)
                 || pqc::is_ml_dsa_mechanism(m)
-                || pqc::is_slh_dsa_mechanism(m) =>
+                || pqc::is_slh_dsa_mechanism(m)
+                || pqc::is_hybrid_ed25519_mldsa65_mechanism(m) =>
             {
+                generate_pqc_keypair(&hsm, mechanism, &pub_template, &priv_template)
+            }
+            #[cfg(feature = "falcon-sig")]
+            m if crate::crypto::falcon::is_falcon_mechanism(m) => {
+                generate_pqc_keypair(&hsm, mechanism, &pub_template, &priv_template)
+            }
+            #[cfg(feature = "frodokem-kem")]
+            m if crate::crypto::frodokem::is_frodo_mechanism(m) => {
+                generate_pqc_keypair(&hsm, mechanism, &pub_template, &priv_template)
+            }
+            #[cfg(feature = "hybrid-kem")]
+            m if crate::crypto::hybrid::is_new_hybrid_kem_mechanism(m) => {
                 generate_pqc_keypair(&hsm, mechanism, &pub_template, &priv_template)
             }
             _ => return CKR_MECHANISM_INVALID,
@@ -3113,13 +3187,207 @@ fn generate_ed25519_keypair(
     Ok((pub_handle, priv_handle, 256))
 }
 
-/// PQC key pair generation helper (ML-KEM, ML-DSA, SLH-DSA)
+/// Shared object-store insertion logic used by PQC keygen paths (Falcon,
+/// FrodoKEM, hybrid KEMs, hybrid signatures). Factored out so the feature-gated
+/// branches don't each reimplement `StoredObject` setup.
+#[allow(clippy::too_many_arguments)]
+fn build_pqc_objects(
+    hsm: &HsmCore,
+    pub_template: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)],
+    priv_template: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)],
+    private_key: RawKeyMaterial,
+    public_key: Vec<u8>,
+    key_type: CK_ULONG,
+    key_bits: u32,
+    is_sign: bool,
+    is_kem: bool,
+) -> Result<(CK_OBJECT_HANDLE, CK_OBJECT_HANDLE, u32), CK_RV> {
+    let pub_handle = hsm.object_store.next_handle().map_err(err_to_rv)?;
+    let mut pub_obj = StoredObject::new(pub_handle, CKO_PUBLIC_KEY);
+    pub_obj.key_type = Some(key_type);
+    pub_obj.public_key_data = Some(public_key.clone());
+    pub_obj.can_verify = is_sign;
+    pub_obj.can_derive = is_kem;
+    pub_obj.private = false;
+    pub_obj.sensitive = false;
+    let rv = apply_pub_template(&mut pub_obj, pub_template);
+    if rv != CKR_OK {
+        return Err(rv);
+    }
+
+    let priv_handle = hsm.object_store.next_handle().map_err(err_to_rv)?;
+    let mut priv_obj = StoredObject::new(priv_handle, CKO_PRIVATE_KEY);
+    priv_obj.key_type = Some(key_type);
+    priv_obj.key_material = Some(private_key);
+    priv_obj.public_key_data = Some(public_key);
+    priv_obj.can_sign = is_sign;
+    priv_obj.can_derive = is_kem;
+    priv_obj.sensitive = true;
+    priv_obj.extractable = false;
+    priv_obj.private = true;
+    let rv = apply_priv_template(&mut priv_obj, priv_template);
+    if rv != CKR_OK {
+        return Err(rv);
+    }
+
+    hsm.object_store.insert_object(pub_obj).map_err(err_to_rv)?;
+    hsm.object_store.insert_object(priv_obj).map_err(err_to_rv)?;
+    Ok((pub_handle, priv_handle, key_bits))
+}
+
+/// PQC key pair generation helper (ML-KEM, ML-DSA, SLH-DSA, plus the
+/// feature-gated Falcon / FrodoKEM / hybrid variants).
 fn generate_pqc_keypair(
     hsm: &HsmCore,
     mechanism: CK_MECHANISM_TYPE,
     pub_template: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)],
     priv_template: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)],
 ) -> Result<(CK_OBJECT_HANDLE, CK_OBJECT_HANDLE, u32), CK_RV> {
+    // Falcon (feature-gated, checked first to avoid noisy conditional chains later).
+    #[cfg(feature = "falcon-sig")]
+    if let Some(variant) = crate::crypto::falcon::mechanism_to_falcon_variant(mechanism) {
+        let (sk_bytes, pk_bytes) =
+            crate::crypto::falcon::falcon_keygen(variant).map_err(err_to_rv)?;
+        // Falcon pairwise: sign a fixed message and verify.
+        let sig = crate::crypto::falcon::falcon_sign(sk_bytes.as_bytes(), b"FIPS pairwise", variant)
+            .map_err(err_to_rv)?;
+        let ok = crate::crypto::falcon::falcon_verify(&pk_bytes, b"FIPS pairwise", &sig, variant)
+            .unwrap_or(false);
+        if !ok {
+            tracing::error!("Falcon pairwise test failed — entering error state");
+            POST_FAILED.store(true, Ordering::Release);
+            return Err(CKR_GENERAL_ERROR);
+        }
+        return build_pqc_objects(
+            hsm,
+            pub_template,
+            priv_template,
+            sk_bytes,
+            pk_bytes,
+            CKK_FALCON,
+            match variant {
+                crate::crypto::falcon::FalconVariant::Falcon512 => 512,
+                crate::crypto::falcon::FalconVariant::Falcon1024 => 1024,
+            },
+            /* is_sign = */ true,
+            /* is_kem  = */ false,
+        );
+    }
+
+    // FrodoKEM (feature-gated).
+    #[cfg(feature = "frodokem-kem")]
+    if let Some(variant) = crate::crypto::frodokem::mechanism_to_frodo_variant(mechanism) {
+        let (sk_bytes, pk_bytes) =
+            crate::crypto::frodokem::frodo_keygen(variant).map_err(err_to_rv)?;
+        // Pairwise: encap + decap + constant-time equality.
+        let (ct, ss_a) = crate::crypto::frodokem::frodo_encapsulate(&pk_bytes, variant)
+            .map_err(err_to_rv)?;
+        let ss_b = crate::crypto::frodokem::frodo_decapsulate(sk_bytes.as_bytes(), &ct, variant)
+            .map_err(err_to_rv)?;
+        use subtle::ConstantTimeEq;
+        let ok: bool = ss_a.ct_eq(&ss_b).into();
+        if !ok {
+            tracing::error!("FrodoKEM pairwise test failed — entering error state");
+            POST_FAILED.store(true, Ordering::Release);
+            return Err(CKR_GENERAL_ERROR);
+        }
+        return build_pqc_objects(
+            hsm,
+            pub_template,
+            priv_template,
+            sk_bytes,
+            pk_bytes,
+            CKK_FRODO_KEM,
+            match variant {
+                crate::crypto::frodokem::FrodoVariant::Frodo640Aes => 128,
+                crate::crypto::frodokem::FrodoVariant::Frodo976Aes => 192,
+                crate::crypto::frodokem::FrodoVariant::Frodo1344Aes => 256,
+            },
+            /* is_sign = */ false,
+            /* is_kem  = */ true,
+        );
+    }
+
+    // Hybrid KEM constructions (feature-gated).
+    #[cfg(feature = "hybrid-kem")]
+    if crate::crypto::hybrid::is_new_hybrid_kem_mechanism(mechanism) {
+        let (sk_bytes, pk_bytes) =
+            crate::crypto::hybrid::hybrid_kem_keygen_by_mechanism(mechanism).map_err(err_to_rv)?;
+        // Pairwise: encap + decap + equality.
+        let (ct, ss_a) =
+            crate::crypto::hybrid::hybrid_kem_encapsulate_by_mechanism(mechanism, &pk_bytes)
+                .map_err(err_to_rv)?;
+        let ss_b = crate::crypto::hybrid::hybrid_kem_decapsulate_by_mechanism(
+            mechanism, &sk_bytes, &ct,
+        )
+        .map_err(err_to_rv)?;
+        if ss_a != ss_b {
+            tracing::error!("Hybrid KEM pairwise test failed — entering error state");
+            POST_FAILED.store(true, Ordering::Release);
+            return Err(CKR_GENERAL_ERROR);
+        }
+        return build_pqc_objects(
+            hsm,
+            pub_template,
+            priv_template,
+            RawKeyMaterial::new(sk_bytes),
+            pk_bytes,
+            CKK_ML_KEM, // reuse CKK_ML_KEM; mechanism disambiguates
+            match mechanism {
+                CKM_HYBRID_P256_MLKEM768 => 768,
+                CKM_HYBRID_X25519_MLKEM1024 | CKM_HYBRID_P384_MLKEM1024 => 1024,
+                _ => 0,
+            },
+            /* is_sign = */ false,
+            /* is_kem  = */ true,
+        );
+    }
+
+    // Hybrid Ed25519 + ML-DSA-65 composite signature key.
+    if pqc::is_hybrid_ed25519_mldsa65_mechanism(mechanism) {
+        let (ed25519_sk, ed25519_pk) = crate::crypto::keygen::generate_ed25519_key_pair()
+            .map_err(err_to_rv)?;
+        let (mldsa_sk, mldsa_vk) =
+            pqc::ml_dsa_keygen(pqc::MlDsaVariant::MlDsa65).map_err(err_to_rv)?;
+
+        // Composite secret key layout: [ed25519_sk_32][mldsa65_seed_32]
+        let mut sk_bytes = Vec::with_capacity(ed25519_sk.as_bytes().len() + mldsa_sk.as_bytes().len());
+        sk_bytes.extend_from_slice(ed25519_sk.as_bytes());
+        sk_bytes.extend_from_slice(mldsa_sk.as_bytes());
+        // Composite public key layout: [ed25519_pk_32][mldsa65_vk]
+        let mut pk_bytes = Vec::with_capacity(ed25519_pk.len() + mldsa_vk.len());
+        pk_bytes.extend_from_slice(&ed25519_pk);
+        pk_bytes.extend_from_slice(&mldsa_vk);
+
+        // Pairwise: sign + verify through the composite helper.
+        let sig = pqc::hybrid_ed25519_mldsa65_sign(
+            ed25519_sk.as_bytes(),
+            mldsa_sk.as_bytes(),
+            b"FIPS pairwise",
+        )
+        .map_err(err_to_rv)?;
+        let ok =
+            pqc::hybrid_ed25519_mldsa65_verify(&mldsa_vk, &ed25519_pk, b"FIPS pairwise", &sig)
+                .unwrap_or(false);
+        if !ok {
+            tracing::error!("Hybrid Ed25519+ML-DSA-65 pairwise test failed");
+            POST_FAILED.store(true, Ordering::Release);
+            return Err(CKR_GENERAL_ERROR);
+        }
+
+        return build_pqc_objects(
+            hsm,
+            pub_template,
+            priv_template,
+            RawKeyMaterial::new(sk_bytes),
+            pk_bytes,
+            CKK_ML_DSA, // reuse CKK_ML_DSA; mechanism disambiguates
+            65,
+            /* is_sign = */ true,
+            /* is_kem  = */ false,
+        );
+    }
+
     let (private_key, public_key, key_type, key_bits) =
         if let Some(variant) = pqc::mechanism_to_ml_kem_variant(mechanism) {
             let (dk_seed, ek_bytes) = pqc::ml_kem_keygen(variant).map_err(err_to_rv)?;
@@ -3139,9 +3407,22 @@ fn generate_pqc_keypair(
             (sk_seed, vk_bytes, CKK_ML_DSA, bits)
         } else if let Some(variant) = pqc::mechanism_to_slh_dsa_variant(mechanism) {
             let (sk_bytes, vk_bytes) = pqc::slh_dsa_keygen(variant).map_err(err_to_rv)?;
+            // `bits` here is the NIST claimed security category (128/192/256),
+            // not a key bit-length — SLH-DSA signatures/keys are a fixed size
+            // per parameter set. Used as informational `CKA_MODULUS_BITS`.
             let bits = match variant {
-                pqc::SlhDsaVariant::Sha2_128s => 128u32,
-                pqc::SlhDsaVariant::Sha2_256s => 256,
+                pqc::SlhDsaVariant::Sha2_128s
+                | pqc::SlhDsaVariant::Sha2_128f
+                | pqc::SlhDsaVariant::Shake_128s
+                | pqc::SlhDsaVariant::Shake_128f => 128u32,
+                pqc::SlhDsaVariant::Sha2_192s
+                | pqc::SlhDsaVariant::Sha2_192f
+                | pqc::SlhDsaVariant::Shake_192s
+                | pqc::SlhDsaVariant::Shake_192f => 192,
+                pqc::SlhDsaVariant::Sha2_256s
+                | pqc::SlhDsaVariant::Sha2_256f
+                | pqc::SlhDsaVariant::Shake_256s
+                | pqc::SlhDsaVariant::Shake_256f => 256,
             };
             (sk_bytes, vk_bytes, CKK_SLH_DSA, bits)
         } else {
@@ -3169,7 +3450,17 @@ fn generate_pqc_keypair(
         let variant_name =
             match pqc::mechanism_to_slh_dsa_variant(mechanism).ok_or(CKR_MECHANISM_INVALID)? {
                 pqc::SlhDsaVariant::Sha2_128s => "SLH-DSA-SHA2-128s",
+                pqc::SlhDsaVariant::Sha2_128f => "SLH-DSA-SHA2-128f",
+                pqc::SlhDsaVariant::Sha2_192s => "SLH-DSA-SHA2-192s",
+                pqc::SlhDsaVariant::Sha2_192f => "SLH-DSA-SHA2-192f",
                 pqc::SlhDsaVariant::Sha2_256s => "SLH-DSA-SHA2-256s",
+                pqc::SlhDsaVariant::Sha2_256f => "SLH-DSA-SHA2-256f",
+                pqc::SlhDsaVariant::Shake_128s => "SLH-DSA-SHAKE-128s",
+                pqc::SlhDsaVariant::Shake_128f => "SLH-DSA-SHAKE-128f",
+                pqc::SlhDsaVariant::Shake_192s => "SLH-DSA-SHAKE-192s",
+                pqc::SlhDsaVariant::Shake_192f => "SLH-DSA-SHAKE-192f",
+                pqc::SlhDsaVariant::Shake_256s => "SLH-DSA-SHAKE-256s",
+                pqc::SlhDsaVariant::Shake_256f => "SLH-DSA-SHAKE-256f",
             };
         pairwise_test::slh_dsa_pairwise_test(&private_key, &public_key, variant_name)
     } else {
@@ -3906,7 +4197,14 @@ fn estimated_signature_len(mechanism: CK_MECHANISM_TYPE, obj: &StoredObject) -> 
         Some(49_856) // SLH-DSA-SHA2-256f max
     } else if pqc::is_hybrid_mechanism(mechanism) {
         Some(49_856 + 104) // hybrid: PQC + ECDSA
+    } else if pqc::is_hybrid_ed25519_mldsa65_mechanism(mechanism) {
+        Some(3309 + 64 + 4) // ML-DSA-65 + Ed25519 + 4-byte length prefix
     } else {
+        #[cfg(feature = "falcon-sig")]
+        if crate::crypto::falcon::is_falcon_mechanism(mechanism) {
+            // Falcon sigs are variable-length; return upstream PQClean maxima.
+            return Some(1280); // Falcon-1024 ≤ 1280; Falcon-512 ≤ 690
+        }
         None
     }
 }

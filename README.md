@@ -41,8 +41,8 @@ graph TB
     subgraph CRYPTO["Crypto Engine"]
         direction LR
         CL["Classical<br/><i>RSA · ECDSA · EdDSA · AES</i>"]
-        PQ["Post-Quantum<br/><i>ML-KEM · ML-DSA · SLH-DSA</i>"]
-        HY["Hybrid & BLS<br/><i>X25519⊕ML-KEM · BLS12-381</i>"]
+        PQ["Post-Quantum<br/><i>ML-KEM · ML-DSA · SLH-DSA<br/>Falcon · FrodoKEM</i>"]
+        HY["Hybrid & BLS<br/><i>X25519/P-256/P-384 ⊕ ML-KEM<br/>ECDSA/Ed25519 ⊕ ML-DSA-65<br/>BLS12-381</i>"]
         DR["DRBG<br/><i>SP 800-90A</i>"]
     end
 
@@ -99,17 +99,19 @@ graph LR
         KDF["KDF  PBKDF2 · Argon2id · HKDF"]
     end
 
-    subgraph PQC["Post-Quantum  (FIPS 203-205)"]
+    subgraph PQC["Post-Quantum  (FIPS 203/204/205 + FN-DSA)"]
         direction TB
         KEM["ML-KEM  512 · 768 · 1024"]
         DSA["ML-DSA  44 · 65 · 87"]
-        SLH["SLH-DSA  SHA2-128s · 256s"]
+        SLH["SLH-DSA  12 param sets<br/><i>SHA2/SHAKE × 128/192/256 × s/f</i>"]
+        FAL["Falcon  512 · 1024<br/><i>FN-DSA draft, C FFI</i>"]
+        FRO["FrodoKEM  640 · 976 · 1344<br/><i>conservative LWE, C FFI</i>"]
     end
 
     subgraph HYBRID["Hybrid  (classical ⊕ PQ)"]
         direction TB
-        HK["Hybrid KEM<br/>X25519 ⊕ ML-KEM-768"]
-        HS["Hybrid Sign<br/>ECDSA-P256 ⊕ ML-DSA-65"]
+        HK["Hybrid KEM<br/>X25519 ⊕ ML-KEM-768<br/>X25519 ⊕ ML-KEM-1024<br/>P-256 ⊕ ML-KEM-768<br/>P-384 ⊕ ML-KEM-1024"]
+        HS["Hybrid Sign<br/>ECDSA-P256 ⊕ ML-DSA-65<br/>Ed25519 ⊕ ML-DSA-65"]
     end
 
     subgraph SPECIAL["Specialized"]
@@ -127,33 +129,116 @@ graph LR
     classDef hybrid fill:#1a6e2e,color:#fff
     classDef special fill:#7a5c2d,color:#fff
     class RSA,EC,ED,AES,SHA,KDF classical
-    class KEM,DSA,SLH pqc
+    class KEM,DSA,SLH,FAL,FRO pqc
     class HK,HS hybrid
     class BLS,VF special
 ```
 
+### Post-quantum algorithm matrix
+
+| Family | Variant | NIST Cat | Standard | PKCS#11 mechanism | Feature flag |
+|--------|---------|---------:|:--------:|-------------------|--------------|
+| **ML-KEM** (Kyber) | 512 / 768 / 1024 | I / III / V | FIPS 203 | `CKM_ML_KEM_*` | default |
+| **ML-DSA** (Dilithium) | 44 / 65 / 87 | II / III / V | FIPS 204 | `CKM_ML_DSA_*` | default |
+| **SLH-DSA** (SPHINCS+) | SHA2/SHAKE × {128, 192, 256} × {s, f} — 12 sets | I–V | FIPS 205 | `CKM_SLH_DSA_*` | default |
+| **Falcon** (FN-DSA) | 512 / 1024 | I / V | FIPS 206 (draft) | `CKM_FALCON_*` | `falcon-sig` |
+| **FrodoKEM-AES** | 640 / 976 / 1344 | I / III / V | Alt-candidate / BSI TR-02102 | `CKM_FRODO_KEM_*_AES` | `frodokem-kem` |
+| **Hybrid KEM** | X25519+ML-KEM-768/1024<br/>P-256+ML-KEM-768<br/>P-384+ML-KEM-1024 | IR 8413 / CNSA 2.0 | — | `CKM_HYBRID_*_MLKEM*` | `hybrid-kem` |
+| **Hybrid signature** | ECDSA-P256+ML-DSA-65<br/>Ed25519+ML-DSA-65 | CNSA 2.0 | — | `CKM_HYBRID_ML_DSA_ECDSA`<br/>`CKM_HYBRID_ED25519_MLDSA65` | default |
+
+ML-KEM, ML-DSA, and SLH-DSA are pure-Rust via the RustCrypto family (`ml-kem`, `ml-dsa`, `slh-dsa`). Falcon and FrodoKEM are C-FFI via `pqcrypto-falcon` / `pqcrypto-frodo` (PQClean reference code) and opt-in — the default build remains C-dep-free. All PQC key generation routes through the SP 800-90A HMAC_DRBG (except Falcon/FrodoKEM, which use PQClean's internal `randombytes` — see [PQC deep-dive](docs/post-quantum-crypto.md#rng-routing)).
+
 ### Hybrid KEM encapsulation flow
+
+All four hybrid KEMs share this construction — only the classical leg and ML-KEM size change, so the wire format and HKDF combiner are identical (the HKDF `info` label is scheme-specific to enforce domain separation between variants).
 
 ```mermaid
 sequenceDiagram
     participant S as Sender
     participant R as Recipient
 
-    Note over S,R: Both parties hold HybridKemPublicKey / HybridKemSecretKey
+    Note over S,R: Both parties hold a long-term hybrid key pair<br/>(classical + ML-KEM)
 
-    S->>S: Generate ephemeral X25519 key pair (eph_sk, eph_pk)
-    S->>S: X25519 DH → ss₁ = eph_sk · recipient.x25519_pk
-    S->>S: ML-KEM-768 Encap(recipient.mlkem_ek) → (ss₂, mlkem_ct)
-    S->>S: HKDF-SHA256(ss₁ ∥ ss₂, info) → shared_secret  [32 bytes]
+    S->>S: Generate ephemeral classical keypair<br/>(X25519 / P-256 / P-384)
+    S->>S: Classical DH → ss₁ = eph_sk · recipient.classical_pk
+    S->>S: ML-KEM Encap(recipient.mlkem_ek) → (ss₂, mlkem_ct)
+    S->>S: HKDF-SHA-256(ss₁ ∥ ss₂, info=scheme_label) → shared_secret [32 B]
 
-    S-->>R: Send HybridCiphertext { eph_pk [32 B], mlkem_ct [1088 B] }
+    S-->>R: HybridCiphertext { classical_epk, mlkem_ct }
 
-    R->>R: X25519 DH → ss₁ = sk.x25519_sk · eph_pk
-    R->>R: ML-KEM-768 Decap(sk.mlkem_dk, mlkem_ct) → ss₂
-    R->>R: HKDF-SHA256(ss₁ ∥ ss₂, info) → shared_secret  [32 bytes]
+    R->>R: Classical DH → ss₁ = sk.classical_sk · eph_pk
+    R->>R: ML-KEM Decap(sk.mlkem_dk, mlkem_ct) → ss₂<br/>(implicit rejection if mlkem_ct malformed)
+    R->>R: HKDF-SHA-256(ss₁ ∥ ss₂, info=scheme_label) → shared_secret [32 B]
 
-    Note over S,R: Both hold identical shared_secret.<br/>Secure if EITHER X25519 OR ML-KEM-768 is unbroken.
+    Note over S,R: Both hold identical shared_secret.<br/>Secure if EITHER leg is unbroken.
 ```
+
+Per-variant byte sizes:
+
+| Variant                  | pk size | sk size | ct size | SS size | HKDF label                            |
+|--------------------------|--------:|--------:|--------:|--------:|---------------------------------------|
+| X25519 + ML-KEM-768      |  1216 B |    96 B |  1120 B |    32 B | `CRATON-HYBRID-X25519-MLKEM768-V1`    |
+| X25519 + ML-KEM-1024     |  1600 B |    96 B |  1600 B |    32 B | `CRATON-HYBRID-X25519-MLKEM1024-V1`   |
+| P-256 + ML-KEM-768       |  1249 B |    96 B |  1153 B |    32 B | `CRATON-HYBRID-P256-MLKEM768-V1`      |
+| P-384 + ML-KEM-1024      |  1665 B |   112 B |  1665 B |    32 B | `CRATON-HYBRID-P384-MLKEM1024-V1`     |
+
+### Composite signature flow (IETF-style)
+
+```mermaid
+sequenceDiagram
+    participant S as Signer
+    participant V as Verifier
+
+    Note over S: sk = [classical_sk ∥ ML-DSA-65_seed]<br/>pk = [classical_pk ∥ ML-DSA-65_vk]
+
+    S->>S: sig_pq = ML-DSA-65.Sign(ML-DSA-65_seed, msg)
+    S->>S: sig_c  = Classical.Sign(classical_sk, msg)<br/>(ECDSA-P256 or Ed25519)
+    S->>S: wire_sig = BE(len(sig_pq)) ∥ sig_pq ∥ sig_c
+
+    S-->>V: (msg, wire_sig)
+
+    V->>V: Parse length prefix, split wire_sig into (sig_pq, sig_c)
+    V->>V: ok_pq = ML-DSA-65.Verify(ML-DSA-65_vk, msg, sig_pq)
+    V->>V: ok_c  = Classical.Verify(classical_pk, msg, sig_c)
+    V->>V: result = ok_pq & ok_c   (bitwise AND — no timing leak)
+
+    Note over V: Both legs must verify. Both verify calls always execute<br/>regardless of early outcomes to avoid side channels.
+```
+
+### PQC dispatch path
+
+How a PKCS#11 client call reaches the correct algorithm implementation:
+
+```mermaid
+flowchart LR
+    APP["Application:<br/>C_GenerateKeyPair / C_Sign / C_EncryptInit"]
+    ABI["pkcs11_abi/functions.rs<br/><i>catch_unwind, validate session</i>"]
+    REG["crypto/mechanisms.rs<br/><i>is_sign/keygen/kem_mechanism</i>"]
+    DISP{"Mechanism → algorithm"}
+
+    APP --> ABI --> REG --> DISP
+
+    DISP -->|"CKM_ML_KEM_*"| MLKEM["crypto/pqc.rs<br/>ml_kem_*()"]
+    DISP -->|"CKM_ML_DSA_*"| MLDSA["crypto/pqc.rs<br/>ml_dsa_*()"]
+    DISP -->|"CKM_SLH_DSA_*<br/>(12 variants)"| SLH["crypto/pqc.rs<br/>slh_dsa_*()<br/>macro-dispatched"]
+    DISP -->|"CKM_FALCON_*"| FAL["crypto/falcon.rs<br/><i>pqcrypto-falcon FFI</i>"]
+    DISP -->|"CKM_FRODO_KEM_*_AES"| FRO["crypto/frodokem.rs<br/><i>pqcrypto-frodo FFI</i>"]
+    DISP -->|"CKM_HYBRID_*_MLKEM*"| HK["crypto/hybrid.rs<br/>hybrid_*_encapsulate()"]
+    DISP -->|"CKM_HYBRID_ML_DSA_ECDSA<br/>CKM_HYBRID_ED25519_MLDSA65"| HS["crypto/pqc.rs<br/>hybrid_*_sign()"]
+
+    MLKEM & MLDSA & SLH & FAL & FRO & HK & HS --> DRBG["crypto/drbg.rs<br/><i>SP 800-90A HMAC_DRBG</i>"]
+
+    classDef pqc fill:#4a2d7a,color:#fff
+    classDef ffi fill:#7a2d4a,color:#fff
+    classDef hybrid fill:#1a6e2e,color:#fff
+    classDef util fill:#2d4a7a,color:#fff
+    class MLKEM,MLDSA,SLH pqc
+    class FAL,FRO ffi
+    class HK,HS hybrid
+    class DRBG,ABI,REG util
+```
+
+> **Feature-gate semantics.** Falcon, FrodoKEM, and the extra hybrid KEMs are compiled only when their respective Cargo features are enabled. `C_GetMechanismList` reports the currently-linked set, filtered further by the runtime `enable_pqc` and `fips_approved_only` flags in `craton_hsm.toml`.
 
 ### BLS12-381 signature aggregation
 
@@ -525,8 +610,11 @@ cargo build --workspace --release
 # Enterprise features
 cargo build --release --features "enterprise"
 
-# Post-quantum + hybrid KEM
+# Post-quantum + hybrid KEM (pure Rust only)
 cargo build --release --features "quantum-resistant,hybrid-kem"
+
+# Full PQC suite — adds Falcon and FrodoKEM via C FFI (needs a C compiler)
+cargo build --release --features "quantum-resistant,hybrid-kem,falcon-sig,frodokem-kem"
 
 # BLS signatures + STARK proofs
 cargo build --release --features "bls-signatures,stark-proofs"
@@ -594,8 +682,10 @@ pkcs11-tool --module $PKCS11_MODULE_PATH --list-slots
 | `rustcrypto-backend` | ✓ | Pure-Rust classical crypto |
 | `awslc-backend` | — | FIPS 140-3 validated AWS-LC |
 | `fips` | — | Restrict to FIPS-approved algorithms |
-| `quantum-resistant` | — | ML-KEM, ML-DSA, SLH-DSA |
-| `hybrid-kem` | — | X25519 + ML-KEM-768 dual encapsulation |
+| `quantum-resistant` | — | Marker flag — ML-KEM, ML-DSA, SLH-DSA (all 12 sets) are always compiled |
+| `hybrid-kem` | — | Hybrid KEMs: X25519+ML-KEM-768/1024, P-256+ML-KEM-768, P-384+ML-KEM-1024 |
+| `falcon-sig` | — | Falcon-512/1024 signatures via `pqcrypto-falcon` (C FFI) |
+| `frodokem-kem` | — | FrodoKEM-640/976/1344-AES via `pqcrypto-frodo` (C FFI) |
 | `bls-signatures` | — | BLS12-381 aggregatable signatures (blst) |
 | `blake3-hash` | — | BLAKE3 parallel hashing |
 | `argon2-kdf` | — | Argon2id memory-hard KDF |
@@ -630,8 +720,11 @@ pkcs11-tool --module $PKCS11_MODULE_PATH --list-slots
 | **SP 800-90A HMAC_DRBG** | internal | ✅ Complete |
 | **ML-KEM 512/768/1024** | ml-kem 0.3 (FIPS 203) | ✅ Complete |
 | **ML-DSA 44/65/87** | ml-dsa 0.1 (FIPS 204) | ✅ Complete |
-| **SLH-DSA** | slh-dsa 0.2 (FIPS 205) | ✅ Complete |
-| **Hybrid KEM** | x25519-dalek + ml-kem | ✅ Feature-gated |
+| **SLH-DSA (12 param sets)** | slh-dsa 0.2 (FIPS 205) | ✅ Complete — SHA2/SHAKE × 128/192/256 × s/f |
+| **Falcon 512/1024** | pqcrypto-falcon 0.4 (PQClean) | ✅ Feature-gated (C FFI) |
+| **FrodoKEM-AES 640/976/1344** | pqcrypto-frodo 0.4 (PQClean) | ✅ Feature-gated (C FFI) |
+| **Hybrid KEMs** | x25519-dalek · p256 · p384 + ml-kem | ✅ 4 constructions, HKDF-SHA-256 combiner |
+| **Hybrid signatures** | ed25519-dalek · p256 + ml-dsa-65 | ✅ 2 composite schemes |
 | **BLS12-381** | blst 0.3 (Ethereum ref) | ✅ Feature-gated |
 | **VOPRF** | voprf 0.5 (RFC 9497) | ✅ Feature-gated |
 | **Groth16 / Bulletproofs ZKP** | ark-groth16, bulletproofs | ✅ Feature-gated |

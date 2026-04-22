@@ -189,7 +189,17 @@ pub fn slh_dsa_pairwise_test(
 
     let slh_dsa_variant = match variant {
         "SLH-DSA-SHA2-128s" => pqc::SlhDsaVariant::Sha2_128s,
+        "SLH-DSA-SHA2-128f" => pqc::SlhDsaVariant::Sha2_128f,
+        "SLH-DSA-SHA2-192s" => pqc::SlhDsaVariant::Sha2_192s,
+        "SLH-DSA-SHA2-192f" => pqc::SlhDsaVariant::Sha2_192f,
         "SLH-DSA-SHA2-256s" => pqc::SlhDsaVariant::Sha2_256s,
+        "SLH-DSA-SHA2-256f" => pqc::SlhDsaVariant::Sha2_256f,
+        "SLH-DSA-SHAKE-128s" => pqc::SlhDsaVariant::Shake_128s,
+        "SLH-DSA-SHAKE-128f" => pqc::SlhDsaVariant::Shake_128f,
+        "SLH-DSA-SHAKE-192s" => pqc::SlhDsaVariant::Shake_192s,
+        "SLH-DSA-SHAKE-192f" => pqc::SlhDsaVariant::Shake_192f,
+        "SLH-DSA-SHAKE-256s" => pqc::SlhDsaVariant::Shake_256s,
+        "SLH-DSA-SHAKE-256f" => pqc::SlhDsaVariant::Shake_256f,
         _ => return Err(HsmError::MechanismInvalid),
     };
 

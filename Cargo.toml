@@ -27,6 +27,13 @@ wrapped-keys = ["serde_with"]
 quantum-resistant = []
 observability = ["prometheus", "axum"]
 
+# Falcon (FN-DSA) signatures via PQClean reference code (C FFI).
+# Keeps the default pure-Rust build C-dep-free; only compiled when requested.
+falcon-sig = ["dep:pqcrypto-falcon", "dep:pqcrypto-traits"]
+
+# FrodoKEM (conservative-lattice KEM) via PQClean reference code (C FFI).
+frodokem-kem = ["dep:pqcrypto-frodo", "dep:pqcrypto-traits"]
+
 # Advanced Feature Sets (placeholder implementations for cutting-edge capabilities)
 zkp = []
 threshold = []
@@ -92,7 +99,9 @@ advanced-all = [
     "advanced-serialization", "performance", "networking", "enhanced-storage",
     # Cutting-edge additions
     "blake3-hash", "hybrid-kem", "chacha20-aead", "argon2-kdf",
-    "bls-signatures", "stark-proofs", "noise-protocol", "onnx-analytics"
+    "bls-signatures", "stark-proofs", "noise-protocol", "onnx-analytics",
+    # Broader PQC algorithm coverage via pqcrypto-* (C FFI)
+    "falcon-sig", "frodokem-kem"
     # Note: fhe-compute, tpm-binding, quic-transport, wasm-plugins excluded from
     # advanced-all due to large build footprint — enable individually as needed.
     # voprf-protocol excluded due to curve25519-dalek version conflict with opaque-auth.
@@ -128,6 +137,14 @@ aes-kw = "0.2"
 ml-kem = { version = "0.3.0-rc.0", features = ["getrandom"] }
 ml-dsa = "0.1.0-rc.7"
 slh-dsa = "0.2.0-rc.4"
+
+# Additional PQC algorithms via PQClean reference code (C FFI, feature-gated).
+# `default-features = false` disables the crate's AVX2 auto-selection so builds
+# stay portable; PQClean falls back to the reference implementation.
+# Gated so the default pure-Rust library remains C-dep-free.
+pqcrypto-falcon = { version = "0.4", default-features = false, optional = true }
+pqcrypto-frodo  = { version = "0.4", default-features = false, optional = true }
+pqcrypto-traits = { version = "0.3", optional = true }
 
 # RNG for PQC crate compatibility (rand_core 0.10 ecosystem).
 # The PQC crates (ml-kem, ml-dsa, slh-dsa) depend on rand_core 0.10 / getrandom 0.4,

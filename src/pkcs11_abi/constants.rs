@@ -140,7 +140,30 @@ pub const CKM_ML_DSA_65: CK_ULONG = 0x80000011;
 pub const CKM_ML_DSA_87: CK_ULONG = 0x80000012;
 pub const CKM_SLH_DSA_SHA2_128S: CK_ULONG = 0x80000020;
 pub const CKM_SLH_DSA_SHA2_256S: CK_ULONG = 0x80000021;
+// SLH-DSA (FIPS 205) — remaining parameter sets
+pub const CKM_SLH_DSA_SHA2_128F: CK_ULONG = 0x80000022;
+pub const CKM_SLH_DSA_SHA2_192S: CK_ULONG = 0x80000023;
+pub const CKM_SLH_DSA_SHA2_192F: CK_ULONG = 0x80000024;
+pub const CKM_SLH_DSA_SHA2_256F: CK_ULONG = 0x80000025;
+pub const CKM_SLH_DSA_SHAKE_128S: CK_ULONG = 0x80000026;
+pub const CKM_SLH_DSA_SHAKE_128F: CK_ULONG = 0x80000027;
+pub const CKM_SLH_DSA_SHAKE_192S: CK_ULONG = 0x80000028;
+pub const CKM_SLH_DSA_SHAKE_192F: CK_ULONG = 0x80000029;
+pub const CKM_SLH_DSA_SHAKE_256S: CK_ULONG = 0x8000002A;
+pub const CKM_SLH_DSA_SHAKE_256F: CK_ULONG = 0x8000002B;
 pub const CKM_HYBRID_ML_DSA_ECDSA: CK_ULONG = 0x80000030;
+// Falcon (FN-DSA — forthcoming FIPS 206)
+pub const CKM_FALCON_512: CK_ULONG = 0x80000040;
+pub const CKM_FALCON_1024: CK_ULONG = 0x80000041;
+// FrodoKEM (conservative LWE-based KEM) — AES variants
+pub const CKM_FRODO_KEM_640_AES: CK_ULONG = 0x80000050;
+pub const CKM_FRODO_KEM_976_AES: CK_ULONG = 0x80000051;
+pub const CKM_FRODO_KEM_1344_AES: CK_ULONG = 0x80000052;
+// Additional hybrid constructions (classical + PQC)
+pub const CKM_HYBRID_X25519_MLKEM1024: CK_ULONG = 0x80000060;
+pub const CKM_HYBRID_P256_MLKEM768: CK_ULONG = 0x80000061;
+pub const CKM_HYBRID_P384_MLKEM1024: CK_ULONG = 0x80000062;
+pub const CKM_HYBRID_ED25519_MLDSA65: CK_ULONG = 0x80000063;
 
 // --- Object Classes (CKO_*) ---
 
@@ -165,6 +188,10 @@ pub const CKK_VENDOR_DEFINED: CK_ULONG = 0x80000000;
 pub const CKK_ML_KEM: CK_ULONG = 0x80000001;
 pub const CKK_ML_DSA: CK_ULONG = 0x80000002;
 pub const CKK_SLH_DSA: CK_ULONG = 0x80000003;
+pub const CKK_FALCON: CK_ULONG = 0x80000004;
+pub const CKK_FRODO_KEM: CK_ULONG = 0x80000005;
+// Composite hybrid keys reuse CKK_ML_KEM / CKK_ML_DSA; variant is encoded
+// in the mechanism constant and stored serialization.
 
 // --- Attribute Types (CKA_*) ---
 

@@ -31,3 +31,19 @@ pub mod bls;
 /// Enable with `hybrid-kem` feature.
 #[cfg(feature = "hybrid-kem")]
 pub mod hybrid_kem;
+
+/// Additional hybrid KEM constructions: X25519+ML-KEM-1024, P-256+ML-KEM-768
+/// (CNSA 2.0), and P-384+ML-KEM-1024 (TOP SECRET aligned).
+/// Enable with `hybrid-kem` feature.
+#[cfg(feature = "hybrid-kem")]
+pub mod hybrid;
+
+/// Falcon (FN-DSA) signatures via PQClean reference code (C FFI).
+/// Enable with `falcon-sig` feature.
+#[cfg(feature = "falcon-sig")]
+pub mod falcon;
+
+/// FrodoKEM (conservative LWE-based KEM) via PQClean reference code (C FFI).
+/// Enable with `frodokem-kem` feature.
+#[cfg(feature = "frodokem-kem")]
+pub mod frodokem;

@@ -32,13 +32,9 @@
 
 #![cfg(feature = "hybrid-kem")]
 
-use chacha20poly1305::aead::OsRng as AeadOsRng;
 use hkdf::Hkdf;
-use ml_kem::{
-    kem::{Decapsulate, Encapsulate},
-    Encoded, EncodedSizeUser, KemCore, MlKem768,
-};
-use rand_core::RngCore;
+use ml_kem::kem::{Ciphertext, Decapsulate, Encapsulate, Key as MlKemKey};
+use ml_kem::{DecapsulationKey, EncapsulationKey, KeyExport, MlKem768};
 use sha2::Sha256;
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -66,15 +62,16 @@ pub struct HybridKemPublicKey {
     /// Recipient's long-term X25519 public key (32 bytes).
     pub x25519_pk: [u8; 32],
     /// Recipient's ML-KEM-768 encapsulation key.
-    pub mlkem_ek: <MlKem768 as KemCore>::EncapsulationKey,
+    pub mlkem_ek: EncapsulationKey<MlKem768>,
 }
 
 impl HybridKemPublicKey {
-    /// Serialise to `32 + mlkem_ek_len` bytes.
+    /// Serialise to `32 + 1184` = 1216 bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(32 + self.mlkem_ek.as_bytes().len());
+        let ek_bytes = self.mlkem_ek.to_bytes();
+        let mut out = Vec::with_capacity(32 + ek_bytes.len());
         out.extend_from_slice(&self.x25519_pk);
-        out.extend_from_slice(self.mlkem_ek.as_bytes());
+        out.extend_from_slice(&ek_bytes[..]);
         out
     }
 }
@@ -89,7 +86,7 @@ pub struct HybridKemSecretKey {
     x25519_sk: StaticSecret,
     /// ML-KEM-768 decapsulation key (contains the seed; sensitive).
     #[zeroize(skip)] // ml-kem types implement ZeroizeOnDrop via Drop
-    mlkem_dk: <MlKem768 as KemCore>::DecapsulationKey,
+    mlkem_dk: DecapsulationKey<MlKem768>,
 }
 
 // ── Ciphertext ────────────────────────────────────────────────────────────────
@@ -101,7 +98,7 @@ pub struct HybridCiphertext {
     /// Sender's ephemeral X25519 public key.
     pub x25519_epk: [u8; 32],
     /// ML-KEM-768 ciphertext (1088 bytes).
-    pub mlkem_ct: <MlKem768 as KemCore>::CiphertextSize,
+    pub mlkem_ct: Ciphertext<MlKem768>,
 }
 
 impl HybridCiphertext {
@@ -109,7 +106,7 @@ impl HybridCiphertext {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(HYBRID_CT_LEN);
         out.extend_from_slice(&self.x25519_epk);
-        out.extend_from_slice(self.mlkem_ct.as_slice());
+        out.extend_from_slice(&self.mlkem_ct[..]);
         out
     }
 
@@ -120,9 +117,9 @@ impl HybridCiphertext {
         }
         let mut x25519_epk = [0u8; 32];
         x25519_epk.copy_from_slice(&bytes[..32]);
-        let mlkem_ct =
-            Encoded::<<MlKem768 as KemCore>::CiphertextSize>::clone_from_slice(&bytes[32..])
-                .map_err(|_| HsmError::DataInvalid)?;
+        let mlkem_ct = bytes[32..]
+            .try_into()
+            .map_err(|_| HsmError::DataInvalid)?;
         Ok(Self {
             x25519_epk,
             mlkem_ct,
@@ -149,14 +146,24 @@ impl HybridSharedSecret {
 
 /// Generate a fresh hybrid KEM keypair.
 ///
-/// Uses the OS CSPRNG for both the X25519 static secret and the ML-KEM seed.
+/// Uses the OS CSPRNG for the X25519 static secret and the FIPS DRBG for the
+/// ML-KEM-768 seed (matching the randomness discipline in `pqc::ml_kem_keygen`).
 pub fn hybrid_kem_keygen() -> (HybridKemPublicKey, HybridKemSecretKey) {
     // X25519 long-term keypair
     let x25519_sk = StaticSecret::random_from_rng(rand_core::OsRng);
     let x25519_pk = X25519PublicKey::from(&x25519_sk);
 
-    // ML-KEM-768 keypair — generate returns (dk, ek)
-    let (mlkem_dk, mlkem_ek) = MlKem768::generate(&mut rand_core::OsRng);
+    // ML-KEM-768 keypair — seed sourced from the SP 800-90A DRBG, then
+    // `DecapsulationKey::from_seed` derives (dk, ek). Infallible DRBG failures
+    // abort the process (see `pqc::PqcDrbgRng`); unwrap here is a panic-on-abort
+    // branch that cannot actually fire.
+    let mut seed = [0u8; 64];
+    let mut drbg = crate::crypto::drbg::HmacDrbg::new()
+        .expect("DRBG construction is infallible outside POST_FAILED");
+    drbg.generate(&mut seed)
+        .expect("DRBG generation is infallible (aborts process on failure)");
+    let mlkem_dk = DecapsulationKey::<MlKem768>::from_seed(seed.into());
+    let mlkem_ek = mlkem_dk.encapsulation_key().clone();
 
     let pk = HybridKemPublicKey {
         x25519_pk: x25519_pk.to_bytes(),
@@ -189,16 +196,15 @@ pub fn hybrid_kem_encapsulate(
     let x25519_ss = eph_sk.diffie_hellman(&recipient_x25519);
 
     // ── Step 2: ML-KEM-768 encapsulation ─────────────────────────────────────
-    let (mlkem_ct, mlkem_ss) = recipient_pk
-        .mlkem_ek
-        .encapsulate(&mut rand_core::OsRng)
-        .map_err(|_| HsmError::GeneralError)?;
+    // DRBG-backed randomness for FIPS compliance (SP 800-90A health testing).
+    let mut rng = crate::crypto::pqc::new_rng()?;
+    let (mlkem_ct, mlkem_ss) = recipient_pk.mlkem_ek.encapsulate_with_rng(&mut rng);
 
     // ── Step 3: HKDF-SHA-256 combination ─────────────────────────────────────
     // IKM = x25519_ss (32B) || mlkem_ss (32B); both secrets contribute entropy.
     let mut ikm = [0u8; 64];
     ikm[..32].copy_from_slice(x25519_ss.as_bytes());
-    ikm[32..].copy_from_slice(mlkem_ss.as_slice());
+    ikm[32..].copy_from_slice(&mlkem_ss[..]);
 
     let mut shared = [0u8; SHARED_SECRET_LEN];
     Hkdf::<Sha256>::new(None, &ikm)
@@ -243,7 +249,7 @@ pub fn hybrid_kem_decapsulate(
     // ── Step 3: HKDF-SHA-256 combination ─────────────────────────────────────
     let mut ikm = [0u8; 64];
     ikm[..32].copy_from_slice(x25519_ss.as_bytes());
-    ikm[32..].copy_from_slice(mlkem_ss.as_slice());
+    ikm[32..].copy_from_slice(&mlkem_ss[..]);
 
     let mut shared = [0u8; SHARED_SECRET_LEN];
     Hkdf::<Sha256>::new(None, &ikm)

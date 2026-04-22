@@ -15,6 +15,7 @@
 ## Architecture & Design
 
 - [Architecture Overview](architecture.md) — module diagram, source layout, data flow
+- [Post-Quantum Cryptography](post-quantum-crypto.md) — algorithm matrix, hybrid constructions, RNG routing, feature gates
 - [Security Model](security-model.md) — threat model, key protection, side-channel resistance
 - [Fork Safety](fork-safety.md) — multi-process constraints and deployment patterns
 
