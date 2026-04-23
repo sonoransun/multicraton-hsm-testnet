@@ -16,6 +16,9 @@
 
 - [Architecture Overview](architecture.md) — module diagram, source layout, data flow
 - [Post-Quantum Cryptography](post-quantum-crypto.md) — algorithm matrix, hybrid constructions, RNG routing, feature gates
+- [PKCS#11 Vendor Extensions](vendor-extensions.md) — native KEM ABI, `CratonExt_*` function table, `CKM_HYBRID_KEM_WRAP`
+- [REST API](rest-api.md) — `craton-hsm-rest` HTTP/JSON gateway with JWT-on-mTLS auth
+- [Language Bindings](language-bindings.md) — Python (pyo3 dual-mode) and Go (pure-Go gRPC) clients
 - [Security Model](security-model.md) — threat model, key protection, side-channel resistance
 - [Fork Safety](fork-safety.md) — multi-process constraints and deployment patterns
 

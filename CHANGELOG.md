@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased — Stub-reduction batch
+
+### Added
+- **Service-layer keygen** (`src/service/keygen.rs`) — `HsmResult`-returning wrapper around the PKCS#11 keygen dispatcher so REST / vendor-ext / bindings share the same path.
+- **`service::rotate::rotate_key`** — atomic PQ key rotation with lifecycle transition of the retired key (`Deactivated` or `Compromised` per policy). Unit tests verify both transitions.
+- **`service::attest::attested_keygen`** — keygen plus a CBOR attestation statement binding the new public key to host measurements under a caller nonce. Platform defaults to `software`; upgrades to TDX / SEV-SNP / Nitro quotes when the `advanced` attestation module is compiled in. Includes a `parse_statement` helper.
+- **Vendor extensions** (`feature = "vendor-ext"`):
+  - `CratonExt_PQKeyRotate` — now a real implementation routed through `service::rotate`.
+  - `CratonExt_AttestedKeygen` — now real, with standard PKCS#11 two-call size-probing for the statement buffer.
+  - New helper `infer_mechanism_from_handle` inside `src/pkcs11_abi/ext/vendor_table.rs` so the rotate path can reconstruct the mechanism from `CKK_*` + public-key byte length.
+- **REST production auth stack** (`craton-hsm-rest`):
+  - `auth::JwksCache` with file-based loading plus an async API ready for URL refresh.
+  - `auth::verify_jwt` enforcing `iss` / `aud` / `exp` / `nbf` with configurable leeway, `kid` → JWKS lookup, and RS256/384/512 + PS256/384/512 + ES256/384 + EdDSA algorithms.
+  - `router::AuthRuntime` + `build_router_with_auth` to wire the full JWKS + mTLS binding stack; the dev-auth shortcut remains available via `CRATON_REST_DEV_AUTH=1`.
+  - `router::ClientCertBinding` extension shape for the TLS acceptor to attach the RFC-8705 SPKI hash.
+- **Cluster**:
+  - `RaftConsensus::add_node` / `::remove_node` now mutate a real in-memory membership map (`Arc<RwLock<ClusterConfiguration>>`), bumping the config version atomically. Duplicate-add / absent-remove surface as descriptive errors.
+  - `ReplicationManager::get_local_object` reads from the live object store instead of returning `ReplicationError`.
+  - `NetworkManager::verify_certificate` matches the presented cert against the pinned `node_certs` registry; returns a useful error (with SHA-256 fingerprint) on miss.
+
+### Changed
+- `src/advanced/quantum_resistant.rs` — deleted the placeholder ghost-keygen + ghost-encap bodies that previously produced random bytes instead of real PQC. Every ML-KEM / ML-DSA / SLH-DSA operation now delegates to `crate::crypto::pqc`, so the `quantum-resistant` feature build compiles again. `PqcKeyPair` now has a manual `Drop` impl zeroing private-key bytes (the `Zeroize` derive can't handle the non-`Zeroize` fields on the struct).
+- Vendor-ext integration test file (`tests/vendor_ext_abi.rs`) extended with `pq_key_rotate_via_vendor_table` and `attested_keygen_cbor_statement_parses`.
+- Documentation: `docs/vendor-extensions.md` describes the now-real `PQKeyRotate` and `AttestedKeygen`, including the CBOR statement layout. `docs/rest-api.md` describes the real JWT + JWKS + mTLS-binding stack.
+
+### Deferred
+- **PKCS#12 export / import** in `src/store/wrapped_key.rs` still returns `FunctionNotSupported`. PKCS#12 PFX construction needs full ASN.1 nesting (AuthenticatedSafe + SafeBag + optional PBE) and was descoped from this batch to keep the session focused.
+- **TPM wiring** in `src/advanced/tpm.rs` remains a feature-gated stub — `tss-esapi` API research was deferred.
+- **Go proto-stub generation** — `bindings/go/client.go` still returns `ErrNotImplemented`. Needs `protoc` / `buf` toolchain fetch.
+
 ## [0.9.1] - 2026-03-20 (Security Audit Hardening)
 
 ### Security Fixes

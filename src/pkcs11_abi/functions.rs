@@ -152,7 +152,7 @@ pub fn test_clear_post_failed() {
     POST_FAILED.store(false, std::sync::atomic::Ordering::Release);
 }
 
-fn get_hsm() -> Result<Arc<HsmCore>, CK_RV> {
+pub(crate) fn get_hsm() -> Result<Arc<HsmCore>, CK_RV> {
     if POST_FAILED.load(Ordering::Acquire) {
         return Err(CKR_GENERAL_ERROR);
     }
@@ -200,7 +200,7 @@ fn get_hsm() -> Result<Arc<HsmCore>, CK_RV> {
 }
 
 /// Helper: convert HsmError to CK_RV
-fn err_to_rv(e: HsmError) -> CK_RV {
+pub(crate) fn err_to_rv(e: HsmError) -> CK_RV {
     e.into()
 }
 
@@ -3237,7 +3237,11 @@ fn build_pqc_objects(
 
 /// PQC key pair generation helper (ML-KEM, ML-DSA, SLH-DSA, plus the
 /// feature-gated Falcon / FrodoKEM / hybrid variants).
-fn generate_pqc_keypair(
+///
+/// `pub(crate)` so `service::keygen` can expose an `HsmResult`-returning
+/// wrapper without duplicating this ~200-line dispatcher. External callers
+/// should prefer `service::keygen::generate_pqc_keypair`.
+pub(crate) fn generate_pqc_keypair(
     hsm: &HsmCore,
     mechanism: CK_MECHANISM_TYPE,
     pub_template: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)],
@@ -5899,6 +5903,13 @@ pub extern "C" fn C_WaitForSlotEvent(
 // ============================================================================
 // Static function list
 // ============================================================================
+
+/// Expose the classic v3.0 function list pointer to `ext::interface_list`.
+/// The returned pointer is `'static` and read-only.
+#[cfg(feature = "vendor-ext")]
+pub(crate) fn function_list_ptr() -> *const CK_FUNCTION_LIST {
+    &FUNCTION_LIST
+}
 
 static FUNCTION_LIST: CK_FUNCTION_LIST = CK_FUNCTION_LIST {
     version: CK_VERSION { major: 3, minor: 0 },

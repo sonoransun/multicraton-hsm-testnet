@@ -1,0 +1,32 @@
+[package]
+name = "craton-hsm-python"
+version = "0.1.0"
+edition = "2021"
+description = "Python bindings for Craton HSM — quantum-safe cryptographic operations with in-process (pyo3) or remote (REST) transport"
+license = "Apache-2.0"
+repository = "https://github.com/craton-co/craton-hsm-core"
+rust-version = "1.75"
+
+[lib]
+name = "craton_hsm"
+# cdylib only — maturin builds this into the Python extension module.
+# Dropping `rlib` here avoids a pipelined-compilation edge case where cargo
+# materialises only craton-hsm's .rmeta and then fails to link the cdylib.
+crate-type = ["cdylib"]
+
+[features]
+default = []
+# Pass-through feature flags that enable matching PQ primitives in the
+# underlying core library. Turning `hybrid-kem` on here, for example,
+# exposes `encapsulate`/`decapsulate` for hybrid KEM mechanisms.
+hybrid-kem   = ["craton-hsm/hybrid-kem"]
+falcon-sig   = ["craton-hsm/falcon-sig"]
+frodokem-kem = ["craton-hsm/frodokem-kem"]
+
+[dependencies]
+craton-hsm = { path = "../..", default-features = false, features = ["rustcrypto-backend"] }
+pyo3 = { version = "0.22", features = ["extension-module"] }
+reqwest = { version = "0.12", features = ["rustls-tls", "json", "blocking"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"

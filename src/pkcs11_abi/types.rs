@@ -190,6 +190,30 @@ pub struct CK_C_INITIALIZE_ARGS {
 }
 pub type CK_C_INITIALIZE_ARGS_PTR = *mut CK_C_INITIALIZE_ARGS;
 
+// --- PKCS#11 v3.0+ CK_INTERFACE (returned by C_GetInterfaceList) ---
+
+/// One row of the interface list returned by `C_GetInterfaceList`.
+///
+/// The structure is defined by the PKCS#11 v3.0 specification; `pInterfaceName`
+/// is a NUL-terminated C string, `pFunctionList` points at an interface-specific
+/// function table (`CK_FUNCTION_LIST_3_0`, `CK_FUNCTION_LIST_3_2`, or a vendor
+/// table such as `CK_CRATON_EXT_FUNCTION_LIST`), and `flags` carries
+/// interface-feature bits (currently zero).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CK_INTERFACE {
+    pub p_interface_name: *const std::os::raw::c_char,
+    pub p_function_list: CK_VOID_PTR,
+    pub flags: CK_FLAGS,
+}
+pub type CK_INTERFACE_PTR = *mut CK_INTERFACE;
+
+// SAFETY: `CK_INTERFACE` holds raw pointers that outlive the C caller for the
+// lifetime of the loaded library (all referents are `'static`). Marking it
+// Send+Sync lets the static interface table live in a `OnceLock`.
+unsafe impl Send for CK_INTERFACE {}
+unsafe impl Sync for CK_INTERFACE {}
+
 // --- CK_NOTIFY callback ---
 
 pub type CK_NOTIFY = Option<

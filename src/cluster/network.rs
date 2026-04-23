@@ -839,11 +839,30 @@ impl NetworkSecurity {
         })
     }
 
-    /// Verify client certificate
+    /// Verify a client certificate by matching it against the known-node
+    /// registry populated via `AuthManager::add_node_cert`.
+    ///
+    /// Returns the `NodeId` registered against the cert on success, or
+    /// `SecurityViolation` when the cert is unknown. Full chain validation
+    /// (intermediate + root CA) is the responsibility of the TLS acceptor
+    /// above; this function enforces peer pinning to specific certs.
     async fn verify_certificate(&self, cert_data: &[u8]) -> Result<NodeId, ClusterError> {
-        // Certificate verification logic would go here
-        // For now, return a placeholder node ID
-        Ok(1)
+        if cert_data.is_empty() {
+            return Err(ClusterError::SecurityViolation {
+                message: "empty certificate".to_string(),
+            });
+        }
+        let registry = self.auth.node_certs.read().await;
+        for (node_id, stored) in registry.iter() {
+            if stored.as_slice() == cert_data {
+                return Ok(*node_id);
+            }
+        }
+        use sha2::{Digest, Sha256};
+        let fp: [u8; 32] = Sha256::digest(cert_data).into();
+        Err(ClusterError::SecurityViolation {
+            message: format!("unpinned certificate fingerprint {}", hex::encode(fp)),
+        })
     }
 }
 

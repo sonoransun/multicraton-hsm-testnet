@@ -165,6 +165,20 @@ pub const CKM_HYBRID_P256_MLKEM768: CK_ULONG = 0x80000061;
 pub const CKM_HYBRID_P384_MLKEM1024: CK_ULONG = 0x80000062;
 pub const CKM_HYBRID_ED25519_MLDSA65: CK_ULONG = 0x80000063;
 
+// Vendor-extension: hybrid-KEM-wrapped symmetric key transport.
+// Wire format: `[u32 BE len][KEM ciphertext][AES-KW ciphertext]`.
+// Dispatched through the existing C_WrapKey / C_UnwrapKey paths when the
+// `vendor-ext` feature is compiled in.
+pub const CKM_HYBRID_KEM_WRAP: CK_ULONG = 0x80000070;
+
+// --- PKCS#11 v3.0+ interface names ---
+//
+// Returned by the vendor-extension `C_GetInterfaceList`. Interface names are
+// fixed strings the client compares against; we expose the two standard
+// PKCS#11 names plus the Craton vendor name.
+pub const CKI_PKCS11_NAME: &str = "PKCS 11";
+pub const CKI_CRATON_EXT_NAME: &str = "Craton PKCS 11";
+
 // --- Object Classes (CKO_*) ---
 
 pub const CKO_DATA: CK_ULONG = 0x00000000;

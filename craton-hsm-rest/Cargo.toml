@@ -1,0 +1,75 @@
+[package]
+name = "craton-hsm-rest"
+version = "0.1.0"
+edition = "2021"
+description = "Craton HSM REST gateway — axum HTTP/JSON front-end with JWT-on-mTLS auth, exposing every PQ-safe operation"
+license = "Apache-2.0"
+repository = "https://github.com/craton-co/craton-hsm-core"
+rust-version = "1.75"
+
+[[bin]]
+name = "craton-hsm-rest"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+# Feature pass-through — turn these on to expose routes/ops that depend on
+# the matching core-library feature. PQC primitives themselves (ML-KEM,
+# ML-DSA, SLH-DSA, composite signatures) are always compiled into the core
+# and therefore always routable.
+hybrid-kem    = ["craton-hsm/hybrid-kem"]
+falcon-sig    = ["craton-hsm/falcon-sig"]
+frodokem-kem  = ["craton-hsm/frodokem-kem"]
+vendor-ext    = ["craton-hsm/vendor-ext"]
+
+[dependencies]
+# Core library — pulls in whichever PQ feature flags the operator enabled at
+# build time. The REST routes call into `service::*` so the same code paths
+# also back the vendor-ext surface and the Python/Go bindings.
+craton-hsm = { path = "..", default-features = false, features = ["rustcrypto-backend"] }
+
+# HTTP + async runtime
+axum = { version = "0.7", features = ["macros", "http2"] }
+axum-extra = { version = "0.9", features = ["typed-header"] }
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = "0.26"
+rustls = "0.23"
+rustls-pemfile = "2"
+tower = { version = "0.5", features = ["limit", "timeout"] }
+tower-http = { version = "0.5", features = ["limit", "trace", "cors", "request-id"] }
+
+# OpenAPI 3.1 documentation generation
+utoipa = { version = "5", features = ["axum_extras", "chrono"] }
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
+
+# Auth: JWT (Bearer) + RFC 8705 mTLS cert-binding
+jsonwebtoken = "9"
+sha2 = "0.10"
+base64 = "0.22"
+subtle = "2"
+
+# Serialization + errors
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Config + time
+toml = "1"
+chrono = { version = "0.4", features = ["serde"] }
+
+# Rate limiting (per-sub + per-client-cert)
+tower_governor = "0.4"
+
+# For test cert generation (integration tests only)
+[dev-dependencies]
+rcgen = "0.13"
+reqwest = { version = "0.12", features = ["rustls-tls", "json"] }
+tempfile = "3"

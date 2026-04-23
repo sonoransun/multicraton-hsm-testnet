@@ -1,5 +1,11 @@
 [workspace]
-members = ["tools/craton-hsm-admin", "tools/pkcs11-spy", "craton-hsm-daemon"]
+members = [
+    "tools/craton-hsm-admin",
+    "tools/pkcs11-spy",
+    "craton-hsm-daemon",
+    "craton-hsm-rest",
+    "bindings/python",
+]
 
 [package]
 name = "craton-hsm"
@@ -33,6 +39,16 @@ falcon-sig = ["dep:pqcrypto-falcon", "dep:pqcrypto-traits"]
 
 # FrodoKEM (conservative-lattice KEM) via PQClean reference code (C FFI).
 frodokem-kem = ["dep:pqcrypto-frodo", "dep:pqcrypto-traits"]
+
+# PKCS#11 vendor extensions — native v3.2-style C_EncapsulateKey / C_DecapsulateKey,
+# a CratonExt_* function table, and the CKM_HYBRID_KEM_WRAP mechanism. Adds new
+# exported C symbols but changes no existing ones, so every current consumer of
+# the PKCS#11 library keeps working unchanged.
+vendor-ext = []
+
+# REST API gateway — exposes a utoipa-documented axum router so the HSM's
+# crypto operations can be reached over HTTP/JSON. See craton-hsm-rest crate.
+rest-api = ["observability"]
 
 # Advanced Feature Sets (placeholder implementations for cutting-edge capabilities)
 zkp = []

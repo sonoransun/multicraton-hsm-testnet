@@ -666,13 +666,20 @@ impl ReplicationManager {
     // Private helper methods
     // ========================================================================
 
-    /// Get object from local HSM
+    /// Get an object from the local HSM's object store.
+    ///
+    /// The returned `StoredObject` is a deep clone — mutating the clone
+    /// does not affect the live in-store object.
     async fn get_local_object(&self, handle: u64) -> Result<StoredObject, ClusterError> {
-        // This would interface with the local HSM to get the object
-        // For now, return a placeholder
-        Err(ClusterError::ReplicationError {
-            message: "Object retrieval not implemented".to_string(),
-        })
+        let arc = self
+            .local_hsm
+            .object_store()
+            .get_object(handle)
+            .map_err(|e| ClusterError::ReplicationError {
+                message: format!("object {} not found: {}", handle, e),
+            })?;
+        let guard = arc.read();
+        Ok(guard.clone())
     }
 
     /// Select nodes for replication targets

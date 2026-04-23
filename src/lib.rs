@@ -30,6 +30,12 @@ pub mod pkcs11_abi;
 /// Platform-specific file ACL helpers (Windows DACL restriction).
 #[cfg(windows)]
 pub(crate) mod platform_acl;
+/// Service layer — pure-Rust action flows shared by every public surface
+/// (PKCS#11 C ABI, vendor-ext, REST, language bindings). Mechanism dispatch
+/// and object-store access for PQC ops live here; each entry point wraps
+/// with its own transport-specific error conversion.
+pub mod service;
+
 /// Session management — `SessionManager`, session state machine, handle allocation.
 pub mod session;
 /// Object storage — in-memory `ObjectStore`, encrypted persistence, key material, backups.

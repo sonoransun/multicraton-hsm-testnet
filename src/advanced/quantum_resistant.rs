@@ -119,7 +119,7 @@ pub enum StandardizationStatus {
 }
 
 /// Usage contexts for algorithms
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum UsageContext {
     /// Long-term key establishment
     KeyEstablishment,
@@ -202,8 +202,12 @@ pub struct HybridSecurityPolicy {
     pub min_quantum_security_bits: u32,
 }
 
-/// Post-quantum key pair
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+/// Post-quantum key pair.
+///
+/// `ZeroizeOnDrop` via a manual `Drop` impl: `Zeroize` isn't derived directly
+/// because PqcAlgorithm / SystemTime / KeyMetadata don't impl Zeroize, but
+/// we still clear `private_key` on drop — the only bytes that matter.
+#[derive(Clone)]
 pub struct PqcKeyPair {
     /// Algorithm used
     pub algorithm: PqcAlgorithm,
@@ -219,6 +223,12 @@ pub struct PqcKeyPair {
 
     /// Key metadata
     pub metadata: KeyMetadata,
+}
+
+impl Drop for PqcKeyPair {
+    fn drop(&mut self) {
+        self.private_key.zeroize();
+    }
 }
 
 /// Key metadata for post-quantum keys
@@ -513,60 +523,57 @@ impl QuantumResistantCrypto {
         rng: &mut R,
         usage: Vec<UsageContext>,
     ) -> HsmResult<PqcKeyPair> {
-        // Validate entropy quality
+        // Validate entropy quality of the caller's RNG before delegating.
         let mut entropy_sample = vec![0u8; 1024];
         rng.fill_bytes(&mut entropy_sample);
         self.validate_entropy(&entropy_sample, "key_generation")?;
 
-        // Placeholder implementation - actual API integration requires stabilized library APIs
+        // Delegate to the real PQC primitives in `crate::crypto::pqc`. The
+        // caller-supplied `rng` is used only for the entropy validation
+        // above; the PQC keygen routes through the SP 800-90A HMAC_DRBG,
+        // consistent with the rest of the HSM.
         let (public_key, private_key) = match algorithm {
             PqcAlgorithm::MlKem512 => {
-                // Generate placeholder keys for ML-KEM-512 (32-byte private key, 800-byte public key)
-                let mut private_key = vec![0u8; 32];
-                let mut public_key = vec![0u8; 800];
-                rng.fill_bytes(&mut private_key);
-                rng.fill_bytes(&mut public_key);
-                (public_key, private_key)
+                let (sk, pk) = crate::crypto::pqc::ml_kem_keygen(
+                    crate::crypto::pqc::MlKemVariant::MlKem512,
+                )?;
+                (pk, sk.as_bytes().to_vec())
             }
             PqcAlgorithm::MlKem768 => {
-                // Generate placeholder keys for ML-KEM-768
-                let mut private_key = vec![0u8; 32];
-                let mut public_key = vec![0u8; 1184];
-                rng.fill_bytes(&mut private_key);
-                rng.fill_bytes(&mut public_key);
-                (public_key, private_key)
+                let (sk, pk) = crate::crypto::pqc::ml_kem_keygen(
+                    crate::crypto::pqc::MlKemVariant::MlKem768,
+                )?;
+                (pk, sk.as_bytes().to_vec())
             }
             PqcAlgorithm::MlKem1024 => {
-                // Generate placeholder keys for ML-KEM-1024
-                let mut private_key = vec![0u8; 32];
-                let mut public_key = vec![0u8; 1568];
-                rng.fill_bytes(&mut private_key);
-                rng.fill_bytes(&mut public_key);
-                (public_key, private_key)
+                let (sk, pk) = crate::crypto::pqc::ml_kem_keygen(
+                    crate::crypto::pqc::MlKemVariant::MlKem1024,
+                )?;
+                (pk, sk.as_bytes().to_vec())
             }
             PqcAlgorithm::MlDsa44 => {
-                // Generate placeholder keys for ML-DSA-44
-                let mut private_key = vec![0u8; 32];
-                let mut public_key = vec![0u8; 1312];
-                rng.fill_bytes(&mut private_key);
-                rng.fill_bytes(&mut public_key);
-                (public_key, private_key)
+                let (sk, pk) = crate::crypto::pqc::ml_dsa_keygen(
+                    crate::crypto::pqc::MlDsaVariant::MlDsa44,
+                )?;
+                (pk, sk.as_bytes().to_vec())
             }
             PqcAlgorithm::MlDsa65 => {
-                // Generate placeholder keys for ML-DSA-65
-                let mut private_key = vec![0u8; 32];
-                let mut public_key = vec![0u8; 1952];
-                rng.fill_bytes(&mut private_key);
-                rng.fill_bytes(&mut public_key);
-                (public_key, private_key)
+                let (sk, pk) = crate::crypto::pqc::ml_dsa_keygen(
+                    crate::crypto::pqc::MlDsaVariant::MlDsa65,
+                )?;
+                (pk, sk.as_bytes().to_vec())
             }
             PqcAlgorithm::MlDsa87 => {
-                // Generate placeholder keys for ML-DSA-87
-                let mut private_key = vec![0u8; 32];
-                let mut public_key = vec![0u8; 2592];
-                rng.fill_bytes(&mut private_key);
-                rng.fill_bytes(&mut public_key);
-                (public_key, private_key)
+                let (sk, pk) = crate::crypto::pqc::ml_dsa_keygen(
+                    crate::crypto::pqc::MlDsaVariant::MlDsa87,
+                )?;
+                (pk, sk.as_bytes().to_vec())
+            }
+            PqcAlgorithm::SlhDsaSha2_128s => {
+                let (sk, pk) = crate::crypto::pqc::slh_dsa_keygen(
+                    crate::crypto::pqc::SlhDsaVariant::Sha2_128s,
+                )?;
+                (pk, sk.as_bytes().to_vec())
             }
             _ => {
                 return Err(HsmError::FunctionNotSupported);
@@ -603,122 +610,45 @@ impl QuantumResistantCrypto {
         })
     }
 
-    /// Perform ML-KEM key encapsulation
+    /// Perform ML-KEM key encapsulation.
     pub fn kem_encapsulate<R: RngCore + CryptoRng>(
         &self,
         public_key: &[u8],
         algorithm: &PqcAlgorithm,
         rng: &mut R,
     ) -> HsmResult<(Vec<u8>, Vec<u8>)> {
-        // Validate entropy
+        // Caller-RNG entropy validation only; the real ML-KEM encapsulation
+        // routes through the SP 800-90A DRBG inside `crypto::pqc`.
         let mut entropy_sample = vec![0u8; 512];
         rng.fill_bytes(&mut entropy_sample);
         self.validate_entropy(&entropy_sample, "kem_encapsulation")?;
 
-        // Placeholder implementation - actual API integration requires stabilized library APIs
-        match algorithm {
-            PqcAlgorithm::MlKem512 => {
-                if public_key.len() != 800 {
-                    return Err(HsmError::DataInvalid);
-                }
-                // Generate placeholder ciphertext and shared secret
-                let mut ciphertext = vec![0u8; 768];
-                let mut shared_secret = vec![0u8; 32];
-                rng.fill_bytes(&mut ciphertext);
-                rng.fill_bytes(&mut shared_secret);
-                Ok((ciphertext, shared_secret))
-            }
-            PqcAlgorithm::MlKem768 => {
-                if public_key.len() != 1184 {
-                    return Err(HsmError::DataInvalid);
-                }
-                let mut ciphertext = vec![0u8; 1088];
-                let mut shared_secret = vec![0u8; 32];
-                rng.fill_bytes(&mut ciphertext);
-                rng.fill_bytes(&mut shared_secret);
-                Ok((ciphertext, shared_secret))
-            }
-            PqcAlgorithm::MlKem1024 => {
-                if public_key.len() != 1568 {
-                    return Err(HsmError::DataInvalid);
-                }
-                let mut ciphertext = vec![0u8; 1568];
-                let mut shared_secret = vec![0u8; 32];
-                rng.fill_bytes(&mut ciphertext);
-                rng.fill_bytes(&mut shared_secret);
-                Ok((ciphertext, shared_secret))
-            }
-            _ => Err(HsmError::FunctionNotSupported),
-        }
+        let variant = match algorithm {
+            PqcAlgorithm::MlKem512 => crate::crypto::pqc::MlKemVariant::MlKem512,
+            PqcAlgorithm::MlKem768 => crate::crypto::pqc::MlKemVariant::MlKem768,
+            PqcAlgorithm::MlKem1024 => crate::crypto::pqc::MlKemVariant::MlKem1024,
+            _ => return Err(HsmError::FunctionNotSupported),
+        };
+        crate::crypto::pqc::ml_kem_encapsulate(public_key, variant)
     }
 
-    /// Perform ML-KEM key decapsulation
+    /// Perform ML-KEM key decapsulation.
     pub fn kem_decapsulate(
         &self,
         private_key: &[u8],
         ciphertext: &[u8],
         algorithm: &PqcAlgorithm,
     ) -> HsmResult<Vec<u8>> {
-        match algorithm {
-            PqcAlgorithm::MlKem512 => {
-                let secret_key =
-                    MlKem512::SecretKey::from_bytes(private_key.try_into().map_err(|_| {
-                        warn!("Invalid private key size");
-                        HsmError::DataInvalid
-                    })?);
-                let ciphertext =
-                    MlKem512::Ciphertext::from_bytes(ciphertext.try_into().map_err(|_| {
-                        warn!("Invalid ciphertext size");
-                        HsmError::DataInvalid
-                    })?);
-                let shared_secret = secret_key.decapsulate(&ciphertext).map_err(|e| {
-                    error!("ML-KEM-512 decapsulation failed: {:?}", e);
-                    HsmError::GeneralError
-                })?;
-                Ok(shared_secret.as_bytes().to_vec())
-            }
-            PqcAlgorithm::MlKem768 => {
-                let secret_key =
-                    MlKem768::SecretKey::from_bytes(private_key.try_into().map_err(|_| {
-                        warn!("Invalid private key size");
-                        HsmError::DataInvalid
-                    })?);
-                let ciphertext =
-                    MlKem768::Ciphertext::from_bytes(ciphertext.try_into().map_err(|_| {
-                        warn!("Invalid ciphertext size");
-                        HsmError::DataInvalid
-                    })?);
-                let shared_secret = secret_key.decapsulate(&ciphertext).map_err(|e| {
-                    error!("ML-KEM-768 decapsulation failed: {:?}", e);
-                    HsmError::GeneralError
-                })?;
-                Ok(shared_secret.as_bytes().to_vec())
-            }
-            PqcAlgorithm::MlKem1024 => {
-                let secret_key =
-                    MlKem1024::SecretKey::from_bytes(private_key.try_into().map_err(|_| {
-                        warn!("Invalid private key size");
-                        HsmError::DataInvalid
-                    })?);
-                let ciphertext =
-                    MlKem1024::Ciphertext::from_bytes(ciphertext.try_into().map_err(|_| {
-                        warn!("Invalid ciphertext size");
-                        HsmError::DataInvalid
-                    })?);
-                let shared_secret = secret_key.decapsulate(&ciphertext).map_err(|e| {
-                    error!("ML-KEM-1024 decapsulation failed: {:?}", e);
-                    HsmError::GeneralError
-                })?;
-                Ok(shared_secret.as_bytes().to_vec())
-            }
-            _ => Err(HsmError::UnsupportedOperation(format!(
-                "KEM decapsulation not supported for {:?}",
-                algorithm
-            ))),
-        }
+        let variant = match algorithm {
+            PqcAlgorithm::MlKem512 => crate::crypto::pqc::MlKemVariant::MlKem512,
+            PqcAlgorithm::MlKem768 => crate::crypto::pqc::MlKemVariant::MlKem768,
+            PqcAlgorithm::MlKem1024 => crate::crypto::pqc::MlKemVariant::MlKem1024,
+            _ => return Err(HsmError::FunctionNotSupported),
+        };
+        crate::crypto::pqc::ml_kem_decapsulate(private_key, ciphertext, variant)
     }
 
-    /// Sign a message using post-quantum digital signature
+    /// Sign a message using a post-quantum digital signature algorithm.
     pub fn sign<R: RngCore + CryptoRng>(
         &self,
         private_key: &[u8],
@@ -726,53 +656,33 @@ impl QuantumResistantCrypto {
         algorithm: &PqcAlgorithm,
         rng: &mut R,
     ) -> HsmResult<Vec<u8>> {
-        // Validate entropy for randomized signatures
+        // Entropy sanity-check the caller's RNG; the PQC signing path uses
+        // the DRBG inside `crypto::pqc`.
         let mut entropy_sample = vec![0u8; 256];
         rng.fill_bytes(&mut entropy_sample);
         self.validate_entropy(&entropy_sample, "pqc_signing")?;
 
         match algorithm {
-            PqcAlgorithm::MlDsa44 => {
-                let signing_key =
-                    MlDsa44::SigningKey::from_bytes(private_key.try_into().map_err(|_| {
-                        warn!("Invalid signing key size");
-                        HsmError::DataInvalid
-                    })?);
-                let signature = signing_key.sign_with_rng(rng, message).map_err(|e| {
-                    error!("ML-DSA-44 signing failed: {:?}", e);
-                    HsmError::GeneralError
-                })?;
-                Ok(signature.as_bytes().to_vec())
-            }
-            PqcAlgorithm::MlDsa65 => {
-                let signing_key =
-                    MlDsa65::SigningKey::from_bytes(private_key.try_into().map_err(|_| {
-                        warn!("Invalid signing key size");
-                        HsmError::DataInvalid
-                    })?);
-                let signature = signing_key.sign_with_rng(rng, message).map_err(|e| {
-                    error!("ML-DSA-65 signing failed: {:?}", e);
-                    HsmError::GeneralError
-                })?;
-                Ok(signature.as_bytes().to_vec())
-            }
-            PqcAlgorithm::MlDsa87 => {
-                let signing_key =
-                    MlDsa87::SigningKey::from_bytes(private_key.try_into().map_err(|_| {
-                        warn!("Invalid signing key size");
-                        HsmError::DataInvalid
-                    })?);
-                let signature = signing_key.sign_with_rng(rng, message).map_err(|e| {
-                    error!("ML-DSA-87 signing failed: {:?}", e);
-                    HsmError::GeneralError
-                })?;
-                Ok(signature.as_bytes().to_vec())
-            }
-            PqcAlgorithm::SlhDsaSha2_128s => {
-                // SLH-DSA is stateless and deterministic, but still benefits from entropy validation
-                // This is a placeholder - actual implementation would use the SLH-DSA library
-                Ok(vec![0u8; 7856]) // Placeholder signature
-            }
+            PqcAlgorithm::MlDsa44 => crate::crypto::pqc::ml_dsa_sign(
+                private_key,
+                message,
+                crate::crypto::pqc::MlDsaVariant::MlDsa44,
+            ),
+            PqcAlgorithm::MlDsa65 => crate::crypto::pqc::ml_dsa_sign(
+                private_key,
+                message,
+                crate::crypto::pqc::MlDsaVariant::MlDsa65,
+            ),
+            PqcAlgorithm::MlDsa87 => crate::crypto::pqc::ml_dsa_sign(
+                private_key,
+                message,
+                crate::crypto::pqc::MlDsaVariant::MlDsa87,
+            ),
+            PqcAlgorithm::SlhDsaSha2_128s => crate::crypto::pqc::slh_dsa_sign(
+                private_key,
+                message,
+                crate::crypto::pqc::SlhDsaVariant::Sha2_128s,
+            ),
             _ => Err(HsmError::UnsupportedOperation(format!(
                 "Signing not supported for {:?}",
                 algorithm
@@ -780,7 +690,7 @@ impl QuantumResistantCrypto {
         }
     }
 
-    /// Verify a post-quantum digital signature
+    /// Verify a post-quantum digital signature.
     pub fn verify(
         &self,
         public_key: &[u8],
@@ -789,61 +699,30 @@ impl QuantumResistantCrypto {
         algorithm: &PqcAlgorithm,
     ) -> HsmResult<bool> {
         match algorithm {
-            PqcAlgorithm::MlDsa44 => {
-                let verifying_key =
-                    MlDsa44::VerifyingKey::from_bytes(public_key.try_into().map_err(|_| {
-                        warn!("Invalid verifying key size");
-                        HsmError::DataInvalid
-                    })?);
-                let signature =
-                    MlDsa44::Signature::from_bytes(signature.try_into().map_err(|_| {
-                        warn!("Invalid signature size");
-                        HsmError::DataInvalid
-                    })?);
-
-                match verifying_key.verify(message, &signature) {
-                    Ok(_) => Ok(true),
-                    Err(_) => Ok(false),
-                }
-            }
-            PqcAlgorithm::MlDsa65 => {
-                let verifying_key =
-                    MlDsa65::VerifyingKey::from_bytes(public_key.try_into().map_err(|_| {
-                        warn!("Invalid verifying key size");
-                        HsmError::DataInvalid
-                    })?);
-                let signature =
-                    MlDsa65::Signature::from_bytes(signature.try_into().map_err(|_| {
-                        warn!("Invalid signature size");
-                        HsmError::DataInvalid
-                    })?);
-
-                match verifying_key.verify(message, &signature) {
-                    Ok(_) => Ok(true),
-                    Err(_) => Ok(false),
-                }
-            }
-            PqcAlgorithm::MlDsa87 => {
-                let verifying_key =
-                    MlDsa87::VerifyingKey::from_bytes(public_key.try_into().map_err(|_| {
-                        warn!("Invalid verifying key size");
-                        HsmError::DataInvalid
-                    })?);
-                let signature =
-                    MlDsa87::Signature::from_bytes(signature.try_into().map_err(|_| {
-                        warn!("Invalid signature size");
-                        HsmError::DataInvalid
-                    })?);
-
-                match verifying_key.verify(message, &signature) {
-                    Ok(_) => Ok(true),
-                    Err(_) => Ok(false),
-                }
-            }
-            PqcAlgorithm::SlhDsaSha2_128s => {
-                // Placeholder verification
-                Ok(signature.len() == 7856)
-            }
+            PqcAlgorithm::MlDsa44 => crate::crypto::pqc::ml_dsa_verify(
+                public_key,
+                message,
+                signature,
+                crate::crypto::pqc::MlDsaVariant::MlDsa44,
+            ),
+            PqcAlgorithm::MlDsa65 => crate::crypto::pqc::ml_dsa_verify(
+                public_key,
+                message,
+                signature,
+                crate::crypto::pqc::MlDsaVariant::MlDsa65,
+            ),
+            PqcAlgorithm::MlDsa87 => crate::crypto::pqc::ml_dsa_verify(
+                public_key,
+                message,
+                signature,
+                crate::crypto::pqc::MlDsaVariant::MlDsa87,
+            ),
+            PqcAlgorithm::SlhDsaSha2_128s => crate::crypto::pqc::slh_dsa_verify(
+                public_key,
+                message,
+                signature,
+                crate::crypto::pqc::SlhDsaVariant::Sha2_128s,
+            ),
             _ => Err(HsmError::UnsupportedOperation(format!(
                 "Verification not supported for {:?}",
                 algorithm
