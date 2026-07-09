@@ -147,10 +147,14 @@ fn test_zeroization_multiple_drops_safe() {
 /// immediately.  We run multiple iterations to increase confidence.
 #[test]
 fn test_zeroization_post_drop_memory_is_zeroed() {
-    // Run multiple iterations to increase confidence against allocator reuse
+    // Run multiple iterations to increase confidence against allocator reuse.
+    // The buffer must be large enough that allocator free-list metadata
+    // (~8-16 bytes written into the freed chunk on macOS/glibc) stays well
+    // under the 10% tolerance: with 64 bytes, 8 metadata bytes = 12.5% and
+    // the test fails spuriously; with 512 bytes it is 1.6%.
     for round in 0..10 {
         let sentinel: u8 = 0xA0 + round;
-        let key = RawKeyMaterial::new(vec![sentinel; 64]);
+        let key = RawKeyMaterial::new(vec![sentinel; 512]);
 
         // Capture pointer and length BEFORE drop
         let ptr = key.as_bytes().as_ptr();

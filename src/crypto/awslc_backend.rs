@@ -514,9 +514,16 @@ impl CryptoBackend for AwsLcBackend {
         modulus: &[u8],
         public_exponent: &[u8],
         plaintext: &[u8],
-        hash_alg: OaepHash,
+        hash: OaepHash,
+        mgf: OaepHash,
+        label: &[u8],
     ) -> HsmResult<Vec<u8>> {
-        let oaep_alg = oaep_hash_to_algorithm(&hash_alg);
+        // aws-lc-rs ties MGF1 to the OAEP hash; a differing MGF cannot be
+        // honored, so reject rather than silently downgrade.
+        if mgf != hash {
+            return Err(HsmError::MechanismParamInvalid);
+        }
+        let oaep_alg = oaep_hash_to_algorithm(&hash);
         let components = awslc_rsa::PublicKeyComponents {
             n: modulus,
             e: public_exponent,
@@ -527,9 +534,10 @@ impl CryptoBackend for AwsLcBackend {
         let oaep_key = awslc_rsa::OaepPublicEncryptingKey::new(pub_enc_key)
             .map_err(|_| HsmError::GeneralError)?;
 
+        let lbl = if label.is_empty() { None } else { Some(label) };
         let mut ciphertext = vec![0u8; oaep_key.ciphertext_size()];
         let result = oaep_key
-            .encrypt(oaep_alg, plaintext, &mut ciphertext, None)
+            .encrypt(oaep_alg, plaintext, &mut ciphertext, lbl)
             .map_err(|_| HsmError::GeneralError)?;
         Ok(result.to_vec())
     }
@@ -538,17 +546,23 @@ impl CryptoBackend for AwsLcBackend {
         &self,
         private_key_der: &[u8],
         ciphertext: &[u8],
-        hash_alg: OaepHash,
+        hash: OaepHash,
+        mgf: OaepHash,
+        label: &[u8],
     ) -> HsmResult<Vec<u8>> {
-        let oaep_alg = oaep_hash_to_algorithm(&hash_alg);
+        if mgf != hash {
+            return Err(HsmError::MechanismParamInvalid);
+        }
+        let oaep_alg = oaep_hash_to_algorithm(&hash);
         let priv_key = awslc_rsa::PrivateDecryptingKey::from_pkcs8(private_key_der)
             .map_err(|_| HsmError::KeyHandleInvalid)?;
         let oaep_key = awslc_rsa::OaepPrivateDecryptingKey::new(priv_key)
             .map_err(|_| HsmError::GeneralError)?;
 
+        let lbl = if label.is_empty() { None } else { Some(label) };
         let mut plaintext = vec![0u8; ciphertext.len()];
         let result = oaep_key
-            .decrypt(oaep_alg, ciphertext, &mut plaintext, None)
+            .decrypt(oaep_alg, ciphertext, &mut plaintext, lbl)
             .map_err(|_| HsmError::EncryptedDataInvalid)?;
         Ok(result.to_vec())
     }

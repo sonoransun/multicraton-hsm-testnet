@@ -12,21 +12,46 @@
 
 use crate::error::{HsmError, HsmResult};
 use tracing::{error, warn};
-// Note: These are cutting-edge libraries with evolving APIs
-// For now, we provide a framework that can be adapted as the APIs stabilize
+// PQC operations delegate to the always-compiled FIPS 203/204/205
+// implementations in crate::crypto::pqc; this module adds the algorithm
+// registry, entropy estimation, and crypto-agility scaffolding on top.
+use crate::crypto::pqc;
 use crate::pkcs11_abi::constants::*;
 use crate::pkcs11_abi::types::CK_MECHANISM_TYPE;
-#[cfg(feature = "quantum-resistant")]
-use ml_dsa;
-#[cfg(feature = "quantum-resistant")]
-use ml_kem;
 use rand_core::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "quantum-resistant")]
-use slh_dsa;
 use std::collections::HashMap;
 use std::fmt;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::Zeroize;
+
+/// Map a [`PqcAlgorithm`] to the corresponding ML-KEM parameter set.
+fn ml_kem_variant_of(algorithm: &PqcAlgorithm) -> Option<pqc::MlKemVariant> {
+    match algorithm {
+        PqcAlgorithm::MlKem512 => Some(pqc::MlKemVariant::MlKem512),
+        PqcAlgorithm::MlKem768 => Some(pqc::MlKemVariant::MlKem768),
+        PqcAlgorithm::MlKem1024 => Some(pqc::MlKemVariant::MlKem1024),
+        _ => None,
+    }
+}
+
+/// Map a [`PqcAlgorithm`] to the corresponding ML-DSA parameter set.
+fn ml_dsa_variant_of(algorithm: &PqcAlgorithm) -> Option<pqc::MlDsaVariant> {
+    match algorithm {
+        PqcAlgorithm::MlDsa44 => Some(pqc::MlDsaVariant::MlDsa44),
+        PqcAlgorithm::MlDsa65 => Some(pqc::MlDsaVariant::MlDsa65),
+        PqcAlgorithm::MlDsa87 => Some(pqc::MlDsaVariant::MlDsa87),
+        _ => None,
+    }
+}
+
+/// Map a [`PqcAlgorithm`] to the corresponding SLH-DSA parameter set.
+fn slh_dsa_variant_of(algorithm: &PqcAlgorithm) -> Option<pqc::SlhDsaVariant> {
+    match algorithm {
+        PqcAlgorithm::SlhDsaSha2_128s => Some(pqc::SlhDsaVariant::Sha2_128s),
+        PqcAlgorithm::SlhDsaSha2_256s => Some(pqc::SlhDsaVariant::Sha2_256s),
+        _ => None,
+    }
+}
 
 /// Quantum-resistant cryptography manager
 pub struct QuantumResistantCrypto {
@@ -487,7 +512,13 @@ impl QuantumResistantCrypto {
         let entropy_estimator = QuantumEntropyEstimator {
             estimators,
             entropy_history: std::collections::VecDeque::new(),
-            min_entropy_per_byte: 7.5, // Require high entropy
+            // Averaged across Shannon, min-entropy, and compression
+            // estimators. Min-entropy measured on a 256-1024 byte sample of a
+            // perfectly uniform source is only ~6-7 bits/byte (expected max
+            // bucket count), so 7.5 would reject genuine OS randomness.
+            // 6.5 still rejects structured data by a wide margin (text ≈ 3,
+            // all-zeros = 0).
+            min_entropy_per_byte: 6.5,
         };
 
         // Create crypto-agility manager
@@ -528,51 +559,23 @@ impl QuantumResistantCrypto {
         rng.fill_bytes(&mut entropy_sample);
         self.validate_entropy(&entropy_sample, "key_generation")?;
 
-        // Delegate to the real PQC primitives in `crate::crypto::pqc`. The
-        // caller-supplied `rng` is used only for the entropy validation
-        // above; the PQC keygen routes through the SP 800-90A HMAC_DRBG,
-        // consistent with the rest of the HSM.
+        // Delegate to the real FIPS 203/204/205 implementations in
+        // crate::crypto::pqc (keys are generated through the SP 800-90A DRBG).
         let (public_key, private_key) = match algorithm {
-            PqcAlgorithm::MlKem512 => {
-                let (sk, pk) = crate::crypto::pqc::ml_kem_keygen(
-                    crate::crypto::pqc::MlKemVariant::MlKem512,
-                )?;
+            PqcAlgorithm::MlKem512 | PqcAlgorithm::MlKem768 | PqcAlgorithm::MlKem1024 => {
+                let variant = ml_kem_variant_of(algorithm).ok_or(HsmError::FunctionNotSupported)?;
+                let (sk, pk) = pqc::ml_kem_keygen(variant)?;
                 (pk, sk.as_bytes().to_vec())
             }
-            PqcAlgorithm::MlKem768 => {
-                let (sk, pk) = crate::crypto::pqc::ml_kem_keygen(
-                    crate::crypto::pqc::MlKemVariant::MlKem768,
-                )?;
+            PqcAlgorithm::MlDsa44 | PqcAlgorithm::MlDsa65 | PqcAlgorithm::MlDsa87 => {
+                let variant = ml_dsa_variant_of(algorithm).ok_or(HsmError::FunctionNotSupported)?;
+                let (sk, pk) = pqc::ml_dsa_keygen(variant)?;
                 (pk, sk.as_bytes().to_vec())
             }
-            PqcAlgorithm::MlKem1024 => {
-                let (sk, pk) = crate::crypto::pqc::ml_kem_keygen(
-                    crate::crypto::pqc::MlKemVariant::MlKem1024,
-                )?;
-                (pk, sk.as_bytes().to_vec())
-            }
-            PqcAlgorithm::MlDsa44 => {
-                let (sk, pk) = crate::crypto::pqc::ml_dsa_keygen(
-                    crate::crypto::pqc::MlDsaVariant::MlDsa44,
-                )?;
-                (pk, sk.as_bytes().to_vec())
-            }
-            PqcAlgorithm::MlDsa65 => {
-                let (sk, pk) = crate::crypto::pqc::ml_dsa_keygen(
-                    crate::crypto::pqc::MlDsaVariant::MlDsa65,
-                )?;
-                (pk, sk.as_bytes().to_vec())
-            }
-            PqcAlgorithm::MlDsa87 => {
-                let (sk, pk) = crate::crypto::pqc::ml_dsa_keygen(
-                    crate::crypto::pqc::MlDsaVariant::MlDsa87,
-                )?;
-                (pk, sk.as_bytes().to_vec())
-            }
-            PqcAlgorithm::SlhDsaSha2_128s => {
-                let (sk, pk) = crate::crypto::pqc::slh_dsa_keygen(
-                    crate::crypto::pqc::SlhDsaVariant::Sha2_128s,
-                )?;
+            PqcAlgorithm::SlhDsaSha2_128s | PqcAlgorithm::SlhDsaSha2_256s => {
+                let variant =
+                    slh_dsa_variant_of(algorithm).ok_or(HsmError::FunctionNotSupported)?;
+                let (sk, pk) = pqc::slh_dsa_keygen(variant)?;
                 (pk, sk.as_bytes().to_vec())
             }
             _ => {
@@ -623,13 +626,10 @@ impl QuantumResistantCrypto {
         rng.fill_bytes(&mut entropy_sample);
         self.validate_entropy(&entropy_sample, "kem_encapsulation")?;
 
-        let variant = match algorithm {
-            PqcAlgorithm::MlKem512 => crate::crypto::pqc::MlKemVariant::MlKem512,
-            PqcAlgorithm::MlKem768 => crate::crypto::pqc::MlKemVariant::MlKem768,
-            PqcAlgorithm::MlKem1024 => crate::crypto::pqc::MlKemVariant::MlKem1024,
-            _ => return Err(HsmError::FunctionNotSupported),
-        };
-        crate::crypto::pqc::ml_kem_encapsulate(public_key, variant)
+        // Delegate to the real FIPS 203 implementation (encapsulation
+        // randomness comes from the SP 800-90A DRBG inside crypto::pqc).
+        let variant = ml_kem_variant_of(algorithm).ok_or(HsmError::FunctionNotSupported)?;
+        pqc::ml_kem_encapsulate(public_key, variant)
     }
 
     /// Perform ML-KEM key decapsulation.
@@ -639,13 +639,10 @@ impl QuantumResistantCrypto {
         ciphertext: &[u8],
         algorithm: &PqcAlgorithm,
     ) -> HsmResult<Vec<u8>> {
-        let variant = match algorithm {
-            PqcAlgorithm::MlKem512 => crate::crypto::pqc::MlKemVariant::MlKem512,
-            PqcAlgorithm::MlKem768 => crate::crypto::pqc::MlKemVariant::MlKem768,
-            PqcAlgorithm::MlKem1024 => crate::crypto::pqc::MlKemVariant::MlKem1024,
-            _ => return Err(HsmError::FunctionNotSupported),
-        };
-        crate::crypto::pqc::ml_kem_decapsulate(private_key, ciphertext, variant)
+        // Delegate to the real FIPS 203 implementation. The private key is
+        // the stored 64-byte (d||z) seed.
+        let variant = ml_kem_variant_of(algorithm).ok_or(HsmError::FunctionNotSupported)?;
+        pqc::ml_kem_decapsulate(private_key, ciphertext, variant)
     }
 
     /// Sign a message using a post-quantum digital signature algorithm.
@@ -662,31 +659,16 @@ impl QuantumResistantCrypto {
         rng.fill_bytes(&mut entropy_sample);
         self.validate_entropy(&entropy_sample, "pqc_signing")?;
 
-        match algorithm {
-            PqcAlgorithm::MlDsa44 => crate::crypto::pqc::ml_dsa_sign(
-                private_key,
-                message,
-                crate::crypto::pqc::MlDsaVariant::MlDsa44,
-            ),
-            PqcAlgorithm::MlDsa65 => crate::crypto::pqc::ml_dsa_sign(
-                private_key,
-                message,
-                crate::crypto::pqc::MlDsaVariant::MlDsa65,
-            ),
-            PqcAlgorithm::MlDsa87 => crate::crypto::pqc::ml_dsa_sign(
-                private_key,
-                message,
-                crate::crypto::pqc::MlDsaVariant::MlDsa87,
-            ),
-            PqcAlgorithm::SlhDsaSha2_128s => crate::crypto::pqc::slh_dsa_sign(
-                private_key,
-                message,
-                crate::crypto::pqc::SlhDsaVariant::Sha2_128s,
-            ),
-            _ => Err(HsmError::UnsupportedOperation(format!(
+        // Delegate to the real FIPS 204/205 implementations.
+        if let Some(variant) = ml_dsa_variant_of(algorithm) {
+            pqc::ml_dsa_sign(private_key, message, variant)
+        } else if let Some(variant) = slh_dsa_variant_of(algorithm) {
+            pqc::slh_dsa_sign(private_key, message, variant)
+        } else {
+            Err(HsmError::UnsupportedOperation(format!(
                 "Signing not supported for {:?}",
                 algorithm
-            ))),
+            )))
         }
     }
 
@@ -698,35 +680,16 @@ impl QuantumResistantCrypto {
         signature: &[u8],
         algorithm: &PqcAlgorithm,
     ) -> HsmResult<bool> {
-        match algorithm {
-            PqcAlgorithm::MlDsa44 => crate::crypto::pqc::ml_dsa_verify(
-                public_key,
-                message,
-                signature,
-                crate::crypto::pqc::MlDsaVariant::MlDsa44,
-            ),
-            PqcAlgorithm::MlDsa65 => crate::crypto::pqc::ml_dsa_verify(
-                public_key,
-                message,
-                signature,
-                crate::crypto::pqc::MlDsaVariant::MlDsa65,
-            ),
-            PqcAlgorithm::MlDsa87 => crate::crypto::pqc::ml_dsa_verify(
-                public_key,
-                message,
-                signature,
-                crate::crypto::pqc::MlDsaVariant::MlDsa87,
-            ),
-            PqcAlgorithm::SlhDsaSha2_128s => crate::crypto::pqc::slh_dsa_verify(
-                public_key,
-                message,
-                signature,
-                crate::crypto::pqc::SlhDsaVariant::Sha2_128s,
-            ),
-            _ => Err(HsmError::UnsupportedOperation(format!(
+        // Delegate to the real FIPS 204/205 implementations.
+        if let Some(variant) = ml_dsa_variant_of(algorithm) {
+            pqc::ml_dsa_verify(public_key, message, signature, variant)
+        } else if let Some(variant) = slh_dsa_variant_of(algorithm) {
+            pqc::slh_dsa_verify(public_key, message, signature, variant)
+        } else {
+            Err(HsmError::UnsupportedOperation(format!(
                 "Verification not supported for {:?}",
                 algorithm
-            ))),
+            )))
         }
     }
 

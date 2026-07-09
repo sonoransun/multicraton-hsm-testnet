@@ -145,6 +145,21 @@ fn validate_digest_length(digest: &[u8], hash_alg: HashAlg) -> HsmResult<()> {
     Ok(())
 }
 
+/// Validate a caller-supplied ECDSA prehash whose length need NOT equal the
+/// curve's default digest size. Per FIPS 186-5, ECDSA signs a digest of any
+/// length, truncating to the leftmost `bit_len(n)` bits — so raw `CKM_ECDSA`
+/// and cross-hash combined mechanisms (e.g. CKM_ECDSA_SHA512 on P-256) are
+/// legal. Bounds the input to [20, 64] bytes (SHA-1 … SHA-512 outputs) to
+/// reject empty or absurd inputs.
+fn validate_ecdsa_prehash_len(digest: &[u8]) -> HsmResult<()> {
+    const MIN: usize = 20;
+    const MAX: usize = 64;
+    if digest.len() < MIN || digest.len() > MAX {
+        return Err(HsmError::DataLenRange);
+    }
+    Ok(())
+}
+
 /// Validate that an RSA private key meets the minimum key size requirement.
 fn validate_rsa_private_key_size(private_key: &RsaPrivateKey) -> HsmResult<()> {
     use rsa::traits::PublicKeyParts;
@@ -396,19 +411,44 @@ pub enum OaepHash {
     Sha512,
 }
 
-/// RSA-OAEP encrypt (using public key components)
+/// Build an `rsa::Oaep` padding from the OAEP hash, MGF hash, and label.
 ///
-/// Uses the SP 800-90A HMAC_DRBG for OAEP padding randomness (via `DrbgRng`)
-/// instead of `OsRng` directly, ensuring all randomness benefits from
-/// the DRBG's continuous health testing and prediction resistance.
+/// The label bytes must be valid UTF-8 because rsa 0.9 stores the label as a
+/// `String`; a non-UTF-8 label is rejected with `MechanismParamInvalid`. An
+/// empty label is the OAEP default.
+fn build_oaep(hash: OaepHash, mgf: OaepHash, label: &[u8]) -> HsmResult<rsa::Oaep> {
+    use rsa::Oaep;
+    let label = std::str::from_utf8(label).map_err(|_| HsmError::MechanismParamInvalid)?;
+    macro_rules! with_mgf {
+        ($D:ty) => {
+            match mgf {
+                OaepHash::Sha256 => Oaep::new_with_mgf_hash_and_label::<$D, Sha256, _>(label),
+                OaepHash::Sha384 => Oaep::new_with_mgf_hash_and_label::<$D, Sha384, _>(label),
+                OaepHash::Sha512 => Oaep::new_with_mgf_hash_and_label::<$D, Sha512, _>(label),
+            }
+        };
+    }
+    Ok(match hash {
+        OaepHash::Sha256 => with_mgf!(Sha256),
+        OaepHash::Sha384 => with_mgf!(Sha384),
+        OaepHash::Sha512 => with_mgf!(Sha512),
+    })
+}
+
+/// RSA-OAEP encrypt (using public key components).
+///
+/// `mgf` selects the MGF1 hash (may differ from `hash`); `label` is the optional
+/// OAEP label / encoding parameter (empty for the default). Uses the SP 800-90A
+/// HMAC_DRBG for padding randomness via `DrbgRng`.
 pub fn rsa_oaep_encrypt(
     modulus: &[u8],
     public_exponent: &[u8],
     plaintext: &[u8],
-    hash_alg: OaepHash,
+    hash: OaepHash,
+    mgf: OaepHash,
+    label: &[u8],
 ) -> HsmResult<CiphertextBuffer> {
     use crate::crypto::drbg::DrbgRng;
-    use rsa::Oaep;
 
     validate_rsa_public_key_size(modulus)?;
     let n = rsa::BigUint::from_bytes_be(modulus);
@@ -416,63 +456,28 @@ pub fn rsa_oaep_encrypt(
     let public_key = RsaPublicKey::new(n, e).map_err(|_| HsmError::KeyHandleInvalid)?;
 
     let mut rng = DrbgRng::new()?;
-
-    match hash_alg {
-        OaepHash::Sha256 => {
-            let padding = Oaep::new::<Sha256>();
-            let ciphertext = public_key
-                .encrypt(&mut rng, padding, plaintext)
-                .map_err(|_| HsmError::GeneralError)?;
-            CiphertextBuffer::try_from(&ciphertext[..]).map_err(|_| HsmError::DataLenRange)
-        }
-        OaepHash::Sha384 => {
-            let padding = Oaep::new::<Sha384>();
-            let ciphertext = public_key
-                .encrypt(&mut rng, padding, plaintext)
-                .map_err(|_| HsmError::GeneralError)?;
-            CiphertextBuffer::try_from(&ciphertext[..]).map_err(|_| HsmError::DataLenRange)
-        }
-        OaepHash::Sha512 => {
-            let padding = Oaep::new::<Sha512>();
-            let ciphertext = public_key
-                .encrypt(&mut rng, padding, plaintext)
-                .map_err(|_| HsmError::GeneralError)?;
-            CiphertextBuffer::try_from(&ciphertext[..]).map_err(|_| HsmError::DataLenRange)
-        }
-    }
+    let padding = build_oaep(hash, mgf, label)?;
+    let ciphertext = public_key
+        .encrypt(&mut rng, padding, plaintext)
+        .map_err(|_| HsmError::GeneralError)?;
+    CiphertextBuffer::try_from(&ciphertext[..]).map_err(|_| HsmError::DataLenRange)
 }
 
-/// RSA-OAEP decrypt (using private key DER)
+/// RSA-OAEP decrypt (using private key DER). See [`rsa_oaep_encrypt`].
 pub fn rsa_oaep_decrypt(
     private_key_der: &[u8],
     ciphertext: &[u8],
-    hash_alg: OaepHash,
+    hash: OaepHash,
+    mgf: OaepHash,
+    label: &[u8],
 ) -> HsmResult<Vec<u8>> {
-    use rsa::Oaep;
-
     let private_key = parse_rsa_private_key(private_key_der)?;
     validate_rsa_private_key_size(&private_key)?;
 
-    match hash_alg {
-        OaepHash::Sha256 => {
-            let padding = Oaep::new::<Sha256>();
-            private_key
-                .decrypt(padding, ciphertext)
-                .map_err(|_| HsmError::EncryptedDataInvalid)
-        }
-        OaepHash::Sha384 => {
-            let padding = Oaep::new::<Sha384>();
-            private_key
-                .decrypt(padding, ciphertext)
-                .map_err(|_| HsmError::EncryptedDataInvalid)
-        }
-        OaepHash::Sha512 => {
-            let padding = Oaep::new::<Sha512>();
-            private_key
-                .decrypt(padding, ciphertext)
-                .map_err(|_| HsmError::EncryptedDataInvalid)
-        }
-    }
+    let padding = build_oaep(hash, mgf, label)?;
+    private_key
+        .decrypt(padding, ciphertext)
+        .map_err(|_| HsmError::EncryptedDataInvalid)
 }
 
 // ============================================================================
@@ -850,7 +855,7 @@ pub(crate) fn rsa_pss_verify_prehashed(
 ///
 /// Uses `RandomizedPrehashSigner` to mix DRBG randomness into the nonce
 /// derivation, protecting against fault injection attacks.
-pub(crate) fn ecdsa_p256_sign_prehashed(
+pub fn ecdsa_p256_sign_prehashed(
     private_key_bytes: &[u8],
     digest: &[u8],
 ) -> HsmResult<SignatureBuffer> {
@@ -858,8 +863,8 @@ pub(crate) fn ecdsa_p256_sign_prehashed(
     use p256::ecdsa::signature::hazmat::RandomizedPrehashSigner;
     use p256::ecdsa::SigningKey;
 
-    // P-256 operates on SHA-256 digests (32 bytes)
-    validate_digest_length(digest, HashAlg::Sha256)?;
+    // FIPS 186-5: ECDSA signs a digest of any length (curve truncates).
+    validate_ecdsa_prehash_len(digest)?;
     let signing_key =
         SigningKey::from_slice(private_key_bytes).map_err(|_| HsmError::KeyHandleInvalid)?;
     let mut rng = DrbgRng::new()?;
@@ -871,7 +876,7 @@ pub(crate) fn ecdsa_p256_sign_prehashed(
 }
 
 /// ECDSA P-256 verify with a pre-computed digest.
-pub(crate) fn ecdsa_p256_verify_prehashed(
+pub fn ecdsa_p256_verify_prehashed(
     public_key_sec1: &[u8],
     digest: &[u8],
     signature_der: &[u8],
@@ -879,8 +884,8 @@ pub(crate) fn ecdsa_p256_verify_prehashed(
     use p256::ecdsa::signature::hazmat::PrehashVerifier;
     use p256::ecdsa::VerifyingKey;
 
-    // P-256 operates on SHA-256 digests (32 bytes)
-    validate_digest_length(digest, HashAlg::Sha256)?;
+    // FIPS 186-5: ECDSA signs a digest of any length (curve truncates).
+    validate_ecdsa_prehash_len(digest)?;
     let verifying_key =
         VerifyingKey::from_sec1_bytes(public_key_sec1).map_err(|_| HsmError::KeyHandleInvalid)?;
     let signature =
@@ -896,7 +901,7 @@ pub(crate) fn ecdsa_p256_verify_prehashed(
 ///
 /// Uses `RandomizedPrehashSigner` to mix DRBG randomness into the nonce
 /// derivation, protecting against fault injection attacks.
-pub(crate) fn ecdsa_p384_sign_prehashed(
+pub fn ecdsa_p384_sign_prehashed(
     private_key_bytes: &[u8],
     digest: &[u8],
 ) -> HsmResult<SignatureBuffer> {
@@ -904,8 +909,8 @@ pub(crate) fn ecdsa_p384_sign_prehashed(
     use p384::ecdsa::signature::hazmat::RandomizedPrehashSigner;
     use p384::ecdsa::SigningKey;
 
-    // P-384 operates on SHA-384 digests (48 bytes)
-    validate_digest_length(digest, HashAlg::Sha384)?;
+    // FIPS 186-5: ECDSA signs a digest of any length (curve truncates).
+    validate_ecdsa_prehash_len(digest)?;
     let signing_key =
         SigningKey::from_slice(private_key_bytes).map_err(|_| HsmError::KeyHandleInvalid)?;
     let mut rng = DrbgRng::new()?;
@@ -917,7 +922,7 @@ pub(crate) fn ecdsa_p384_sign_prehashed(
 }
 
 /// ECDSA P-384 verify with a pre-computed digest.
-pub(crate) fn ecdsa_p384_verify_prehashed(
+pub fn ecdsa_p384_verify_prehashed(
     public_key_sec1: &[u8],
     digest: &[u8],
     signature_der: &[u8],
@@ -925,8 +930,8 @@ pub(crate) fn ecdsa_p384_verify_prehashed(
     use p384::ecdsa::signature::hazmat::PrehashVerifier;
     use p384::ecdsa::VerifyingKey;
 
-    // P-384 operates on SHA-384 digests (48 bytes)
-    validate_digest_length(digest, HashAlg::Sha384)?;
+    // FIPS 186-5: ECDSA signs a digest of any length (curve truncates).
+    validate_ecdsa_prehash_len(digest)?;
     let verifying_key =
         VerifyingKey::from_sec1_bytes(public_key_sec1).map_err(|_| HsmError::KeyHandleInvalid)?;
     let signature =

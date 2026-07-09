@@ -12,6 +12,10 @@
 //! The clustering implementation ensures that key material is securely replicated
 //! across multiple HSM nodes while maintaining PKCS#11 compliance and strong
 //! security guarantees.
+//!
+//! Note: cluster transport key exchange is currently classical (X25519/TLS);
+//! deployments with harvest-now-decrypt-later concerns should not span
+//! untrusted networks until post-quantum transport lands.
 
 #![warn(missing_docs)]
 

@@ -2,6 +2,7 @@
 // Copyright 2026 Craton Software Company
 pub mod constants;
 pub mod functions;
+pub mod params;
 pub mod types;
 
 /// PKCS#11 vendor-extension surface. Gated by the `vendor-ext` feature so

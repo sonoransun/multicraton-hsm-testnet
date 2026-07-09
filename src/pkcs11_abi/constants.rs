@@ -79,6 +79,8 @@ pub const CKR_WRAPPING_KEY_SIZE_RANGE: CK_ULONG = 0x00000114;
 pub const CKR_WRAPPING_KEY_TYPE_INCONSISTENT: CK_ULONG = 0x00000115;
 pub const CKR_RANDOM_SEED_NOT_SUPPORTED: CK_ULONG = 0x00000120;
 pub const CKR_RANDOM_NO_RNG: CK_ULONG = 0x00000121;
+/// The requested elliptic curve (from `CKA_EC_PARAMS`) is not supported.
+pub const CKR_CURVE_NOT_SUPPORTED: CK_ULONG = 0x00000140;
 pub const CKR_BUFFER_TOO_SMALL: CK_ULONG = 0x00000150;
 pub const CKR_SAVED_STATE_INVALID: CK_ULONG = 0x00000160;
 pub const CKR_INFORMATION_SENSITIVE: CK_ULONG = 0x00000170;
@@ -130,6 +132,73 @@ pub const CKM_SHA512: CK_ULONG = 0x00000270;
 pub const CKM_SHA3_256: CK_ULONG = 0x000002B0;
 pub const CKM_SHA3_384: CK_ULONG = 0x000002C0;
 pub const CKM_SHA3_512: CK_ULONG = 0x000002D0;
+
+// --- Extra SHA-2 digest mechanisms (OASIS PKCS#11 3.0) ---
+pub const CKM_SHA224: CK_ULONG = 0x00000255;
+pub const CKM_SHA512_224: CK_ULONG = 0x00000048;
+pub const CKM_SHA512_256: CK_ULONG = 0x0000004C;
+
+// --- HMAC signing mechanisms (OASIS PKCS#11 3.0) ---
+pub const CKM_SHA224_HMAC: CK_ULONG = 0x00000256;
+pub const CKM_SHA256_HMAC: CK_ULONG = 0x00000251;
+pub const CKM_SHA384_HMAC: CK_ULONG = 0x00000261;
+pub const CKM_SHA512_HMAC: CK_ULONG = 0x00000271;
+
+// --- Generic secret key generation (for HMAC/HKDF/KDF base keys) ---
+pub const CKM_GENERIC_SECRET_KEY_GEN: CK_ULONG = 0x00000350;
+
+// --- HKDF (OASIS PKCS#11 3.0) ---
+pub const CKM_HKDF_DERIVE: CK_ULONG = 0x0000402A;
+pub const CKM_HKDF_DATA: CK_ULONG = 0x0000402B;
+pub const CKM_HKDF_KEY_GEN: CK_ULONG = 0x0000402C;
+
+// --- SP 800-108 KDF (OASIS PKCS#11 3.0) ---
+pub const CKM_SP800_108_COUNTER_KDF: CK_ULONG = 0x000003AC;
+
+// --- Montgomery-curve keygen (X25519 via CKM_ECDH1_DERIVE) ---
+pub const CKM_EC_MONTGOMERY_KEY_PAIR_GEN: CK_ULONG = 0x00001056;
+
+// --- EC key-derivation function types (CK_EC_KDF_TYPE) ---
+// Selected via the `kdf` field of CK_ECDH1_DERIVE_PARAMS. CKD_NULL uses the raw
+// shared secret (leftmost bytes); CKD_SHA*_KDF apply the ANSI X9.63 / SP 800-56A
+// single-step concatenation KDF. (CKD_SHA1_KDF is defined for completeness but
+// not supported — SHA-1 is deprecated for key derivation per SP 800-131A.)
+/// No KDF: use the raw shared secret (leftmost bytes).
+pub const CKD_NULL: CK_ULONG = 0x00000001;
+/// X9.63 KDF with SHA-1 (unsupported — SHA-1 deprecated for KDF).
+pub const CKD_SHA1_KDF: CK_ULONG = 0x00000002;
+/// X9.63 / SP 800-56A concatenation KDF with SHA-224.
+pub const CKD_SHA224_KDF: CK_ULONG = 0x00000005;
+/// X9.63 / SP 800-56A concatenation KDF with SHA-256.
+pub const CKD_SHA256_KDF: CK_ULONG = 0x00000006;
+/// X9.63 / SP 800-56A concatenation KDF with SHA-384.
+pub const CKD_SHA384_KDF: CK_ULONG = 0x00000007;
+/// X9.63 / SP 800-56A concatenation KDF with SHA-512.
+pub const CKD_SHA512_KDF: CK_ULONG = 0x00000008;
+
+// --- HKDF salt types (CK_HKDF_PARAMS.ul_salt_type) ---
+/// No salt: HKDF-Extract uses the RFC 5869 all-zero salt.
+pub const CKF_HKDF_SALT_NULL: CK_ULONG = 0x00000001;
+/// Salt supplied as a byte array in `p_salt` / `ul_salt_len`.
+pub const CKF_HKDF_SALT_DATA: CK_ULONG = 0x00000002;
+/// Salt taken from the key object referenced by `h_salt_key`.
+pub const CKF_HKDF_SALT_KEY: CK_ULONG = 0x00000004;
+
+// --- RSA MGF types (CK_RSA_PKCS_MGF_TYPE) for PSS / OAEP ---
+/// MGF1 with SHA-1 (unsupported — SHA-1 deprecated).
+pub const CKG_MGF1_SHA1: CK_ULONG = 0x00000001;
+/// MGF1 with SHA-256.
+pub const CKG_MGF1_SHA256: CK_ULONG = 0x00000002;
+/// MGF1 with SHA-384.
+pub const CKG_MGF1_SHA384: CK_ULONG = 0x00000003;
+/// MGF1 with SHA-512.
+pub const CKG_MGF1_SHA512: CK_ULONG = 0x00000004;
+/// MGF1 with SHA-224.
+pub const CKG_MGF1_SHA224: CK_ULONG = 0x00000005;
+
+// --- RSA-OAEP source type (CK_RSA_PKCS_OAEP_SOURCE_TYPE) ---
+/// The OAEP label is supplied directly in `pSourceData`.
+pub const CKZ_DATA_SPECIFIED: CK_ULONG = 0x00000001;
 
 // --- Post-Quantum Mechanisms (vendor-defined range) ---
 pub const CKM_ML_KEM_512: CK_ULONG = 0x80000001;
@@ -195,7 +264,12 @@ pub const CKK_DSA: CK_ULONG = 0x00000001;
 pub const CKK_DH: CK_ULONG = 0x00000002;
 pub const CKK_EC: CK_ULONG = 0x00000003;
 pub const CKK_AES: CK_ULONG = 0x0000001F;
+pub const CKK_GENERIC_SECRET: CK_ULONG = 0x00000010;
+pub const CKK_SHA224_HMAC: CK_ULONG = 0x0000002E;
 pub const CKK_SHA256_HMAC: CK_ULONG = 0x0000002B;
+pub const CKK_SHA384_HMAC: CK_ULONG = 0x0000002C;
+pub const CKK_SHA512_HMAC: CK_ULONG = 0x0000002D;
+pub const CKK_HKDF: CK_ULONG = 0x00000042;
 pub const CKK_EC_EDWARDS: CK_ULONG = 0x00000040;
 pub const CKK_EC_MONTGOMERY: CK_ULONG = 0x00000041;
 pub const CKK_VENDOR_DEFINED: CK_ULONG = 0x80000000;

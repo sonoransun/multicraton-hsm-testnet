@@ -17,7 +17,6 @@ use crate::store::attributes::ObjectStore;
 use crate::token::slot::SlotManager;
 use zeroize::Zeroizing;
 
-
 /// The global HSM state. Holds all managers needed for PKCS#11 operations.
 pub struct HsmCore {
     pub(crate) slot_manager: SlotManager,

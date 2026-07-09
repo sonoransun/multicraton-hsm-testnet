@@ -278,11 +278,7 @@ fn test_attribute_value_exceeds_max_find_objects() {
         p_value: oversized_value.as_ptr() as CK_VOID_PTR,
         value_len: oversized_value.len() as CK_ULONG,
     }];
-    let rv = C_FindObjectsInit(
-        session,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-    );
+    let rv = C_FindObjectsInit(session, template.as_mut_ptr(), template.len() as CK_ULONG);
     assert!(
         rv == CKR_ATTRIBUTE_VALUE_INVALID || rv == CKR_ARGUMENTS_BAD,
         "C_FindObjectsInit with attribute value > 64 KB should be rejected, got: 0x{:08X}",

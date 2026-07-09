@@ -17,7 +17,7 @@ repository = "https://github.com/craton-co/craton-hsm-core"
 homepage = "https://github.com/craton-co/craton-hsm-core"
 keywords = ["pkcs11", "hsm", "cryptography", "security", "fips"]
 categories = ["cryptography", "api-bindings"]
-rust-version = "1.75"
+rust-version = "1.85"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -68,8 +68,9 @@ enhanced-storage = []
 # BLAKE3: parallel tree-hashing, 3× faster than SHA-256, used in BAO/Zcash
 blake3-hash = ["dep:blake3"]
 
-# Hybrid KEM: X25519 + ML-KEM-768 dual-encapsulation (NIST IR 8413, CNSA 2.0)
-hybrid-kem = ["dep:x25519-dalek", "dep:chacha20poly1305"]
+# Hybrid KEM: X-Wing (X25519 + ML-KEM-768, draft-connolly-cfrg-xwing-kem-06).
+# EXPERIMENTAL — the draft is not final; see src/crypto/hybrid_kem.rs.
+hybrid-kem = ["dep:x-wing"]
 
 # ChaCha20-Poly1305 / XChaCha20 AEAD — nonce-misuse resistant AEAD
 chacha20-aead = ["dep:chacha20poly1305"]
@@ -150,9 +151,11 @@ hkdf = "0.12"
 aes-kw = "0.2"
 
 # Post-quantum cryptography (Phase 3)
-ml-kem = { version = "0.3.0-rc.0", features = ["getrandom"] }
-ml-dsa = "0.1.0-rc.7"
-slh-dsa = "0.2.0-rc.4"
+# hazmat: deterministic encapsulation, required for the fixed-vector POST KATs
+ml-kem = { version = "0.3.2", features = ["getrandom", "hazmat"] }
+ml-dsa = "0.1.1"
+# Pinned exactly: still a release candidate; API may shift between RCs
+slh-dsa = "=0.2.0-rc.5"
 
 # Additional PQC algorithms via PQClean reference code (C FFI, feature-gated).
 # `default-features = false` disables the crate's AVX2 auto-selection so builds
@@ -257,8 +260,9 @@ rayon = { version = "1.10", optional = true }
 # hashing workloads where parallelism pays off.
 blake3 = { version = "1", features = ["rayon"], optional = true }
 
-# X25519 Diffie-Hellman for Hybrid KEM (static_secrets needed for long-term keys)
-x25519-dalek = { version = "2", features = ["static_secrets"], optional = true }
+# X25519 Diffie-Hellman: CKM_ECDH1_DERIVE over Montgomery keys (classical
+# suite) plus the hybrid KEM. Non-optional: X25519 ECDH is always available.
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 
 # ChaCha20-Poly1305 / XChaCha20-Poly1305 AEAD (RustCrypto)
 chacha20poly1305 = { version = "0.10", optional = true }
@@ -297,6 +301,8 @@ wasmtime = { version = "25", features = ["cranelift"], optional = true }
 
 # tract-onnx: pure-Rust ONNX inference — no C/Python deps, runs neural nets in-process
 tract-onnx = { version = "0.21", optional = true }
+x-wing = { version = "=0.1.0-rc.0", features = ["zeroize"], optional = true }
+p521 = { version = "0.13", features = ["ecdsa", "ecdh"] }
 
 # voprf: Verifiable Oblivious PRF (IETF RFC 9497) — private token issuance, rate limiting
 # voprf disabled: curve25519-dalek version conflict with opaque-ke

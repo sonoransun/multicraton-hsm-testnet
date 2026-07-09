@@ -62,7 +62,9 @@ fn test_full_pkcs11_lifecycle() {
     assert_eq!(rv, CKR_SLOT_ID_INVALID);
 
     // 8. Init token
-    let so_pin = b"12345678";
+    // Must satisfy the PIN policy: >=8 bytes, >=3 distinct bytes, and >=2
+    // character classes (token.rs PIN_MIN_* constants).
+    let so_pin = b"SoPin1234";
     let mut label = [b' '; 32];
     label[..9].copy_from_slice(b"TestToken");
     let rv = C_InitToken(

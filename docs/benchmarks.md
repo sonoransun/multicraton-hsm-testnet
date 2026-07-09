@@ -111,7 +111,7 @@ Nine targeted optimizations were applied across two layers: the cryptographic ba
 
 1. **RSA Private Key Cache** (`src/crypto/sign.rs`): Parsed `RsaPrivateKey` structs are cached in a lock-free DashMap keyed by SHA-256(DER). Avoids expensive PKCS#8 DER parsing + bignum reconstruction on every sign operation. Cache holds up to 64 keys with full eviction on overflow.
 
-2. **GCM Key ID Fast Path** (`src/crypto/encrypt.rs`): For 32-byte AES-256 keys, the GCM nonce counter lookup uses the raw key bytes directly as the DashMap key instead of computing SHA-256(key). Eliminates a hash computation on every AES-GCM encrypt. AES-GCM encrypt 256B dropped from 1.396 us to 0.600 us (**57% faster**).
+2. **GCM Key ID (raw-key fast path reverted)** (`src/crypto/encrypt.rs`): An earlier optimization used the raw key bytes directly as the GCM nonce-counter DashMap key for 32-byte AES-256 keys, skipping a SHA-256 hash. This was reverted for security: `gcm_key_id()` now always returns SHA-256(key), so raw key material never sits in map storage (the hash is irreversible and leaves no residual key bytes after key destruction). Any performance figures previously attributed to the raw-key fast path no longer describe shipped code.
 
 3. **Compile-time Tracing Elimination**: Added `tracing/max_level_info` and `tracing/release_max_level_info` features to eliminate `debug!` and `trace!` instrumentation at compile time in release builds.
 

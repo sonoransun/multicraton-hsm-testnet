@@ -22,6 +22,10 @@ pub fn is_sign_mechanism(mechanism: CK_MECHANISM_TYPE) -> bool {
             | CKM_ECDSA_SHA384
             | CKM_ECDSA_SHA512
             | CKM_EDDSA
+            | CKM_SHA224_HMAC
+            | CKM_SHA256_HMAC
+            | CKM_SHA384_HMAC
+            | CKM_SHA512_HMAC
             | CKM_ML_DSA_44
             | CKM_ML_DSA_65
             | CKM_ML_DSA_87
@@ -69,6 +73,7 @@ pub fn is_keypair_gen_mechanism(mechanism: CK_MECHANISM_TYPE) -> bool {
         mechanism,
         CKM_RSA_PKCS_KEY_PAIR_GEN
             | CKM_EC_KEY_PAIR_GEN
+            | CKM_EC_MONTGOMERY_KEY_PAIR_GEN
             | CKM_EDDSA
             | CKM_ML_KEM_512
             | CKM_ML_KEM_768
@@ -141,9 +146,12 @@ pub fn is_digest_mechanism(mechanism: CK_MECHANISM_TYPE) -> bool {
     matches!(
         mechanism,
         CKM_SHA_1
+            | CKM_SHA224
             | CKM_SHA256
             | CKM_SHA384
             | CKM_SHA512
+            | CKM_SHA512_224
+            | CKM_SHA512_256
             | CKM_SHA3_256
             | CKM_SHA3_384
             | CKM_SHA3_512
@@ -157,7 +165,10 @@ pub fn is_wrap_mechanism(mechanism: CK_MECHANISM_TYPE) -> bool {
 
 /// Check if a mechanism is supported for key derivation
 pub fn is_derive_mechanism(mechanism: CK_MECHANISM_TYPE) -> bool {
-    matches!(mechanism, CKM_ECDH1_DERIVE | CKM_ECDH1_COFACTOR_DERIVE)
+    matches!(
+        mechanism,
+        CKM_ECDH1_DERIVE | CKM_ECDH1_COFACTOR_DERIVE | CKM_HKDF_DERIVE
+    )
 }
 
 /// Get the list of all supported mechanisms
@@ -174,8 +185,10 @@ pub fn supported_mechanisms() -> Vec<CK_MECHANISM_TYPE> {
         CKM_SHA384_RSA_PKCS_PSS,
         CKM_SHA512_RSA_PKCS_PSS,
         CKM_RSA_PKCS_OAEP,
-        // EC
+        // EC — CKM_EC_KEY_PAIR_GEN + CKM_ECDSA* cover P-256/P-384/P-521/secp256k1
+        // (the curve is selected by CKA_EC_PARAMS, not the mechanism).
         CKM_EC_KEY_PAIR_GEN,
+        CKM_EC_MONTGOMERY_KEY_PAIR_GEN,
         CKM_ECDSA,
         CKM_ECDSA_SHA256,
         CKM_ECDSA_SHA384,
@@ -184,6 +197,14 @@ pub fn supported_mechanisms() -> Vec<CK_MECHANISM_TYPE> {
         CKM_ECDH1_COFACTOR_DERIVE,
         // EdDSA
         CKM_EDDSA,
+        // HMAC (FIPS 198-1)
+        CKM_SHA224_HMAC,
+        CKM_SHA256_HMAC,
+        CKM_SHA384_HMAC,
+        CKM_SHA512_HMAC,
+        CKM_GENERIC_SECRET_KEY_GEN,
+        // KDF (SP 800-56C / RFC 5869)
+        CKM_HKDF_DERIVE,
         // AES
         CKM_AES_KEY_GEN,
         CKM_AES_GCM,
@@ -194,9 +215,12 @@ pub fn supported_mechanisms() -> Vec<CK_MECHANISM_TYPE> {
         CKM_AES_KEY_WRAP_KWP,
         // Digest
         CKM_SHA_1,
+        CKM_SHA224,
         CKM_SHA256,
         CKM_SHA384,
         CKM_SHA512,
+        CKM_SHA512_224,
+        CKM_SHA512_256,
         CKM_SHA3_256,
         CKM_SHA3_384,
         CKM_SHA3_512,
@@ -294,13 +318,24 @@ pub fn is_fips_approved(mechanism: CK_MECHANISM_TYPE) -> bool {
             | CKM_SHA256
             | CKM_SHA384
             | CKM_SHA512
+            // SHA-2 truncated — FIPS 180-4
+            | CKM_SHA224
+            | CKM_SHA512_224
+            | CKM_SHA512_256
             // SHA-3 — FIPS 202
             | CKM_SHA3_256
             | CKM_SHA3_384
             | CKM_SHA3_512
+            // HMAC — FIPS 198-1
+            | CKM_SHA224_HMAC
+            | CKM_SHA256_HMAC
+            | CKM_SHA384_HMAC
+            | CKM_SHA512_HMAC
+            // KDF — SP 800-56C Rev 2 (HKDF) / SP 800-108 (KBKDF)
+            | CKM_HKDF_DERIVE
     )
     // NOT approved: CKM_EDDSA, CKM_SHA_1 (for signing), CKM_ML_KEM_*, CKM_ML_DSA_*,
-    //               CKM_SLH_DSA_*, CKM_HYBRID_ML_DSA_ECDSA
+    //               CKM_SLH_DSA_*, CKM_HYBRID_ML_DSA_ECDSA, secp256k1, X25519
 }
 
 /// Check if a mechanism is a PQC (Post-Quantum Cryptography) mechanism.

@@ -7,6 +7,8 @@
 //! cluster nodes, with support for threshold secret sharing, encrypted transport,
 //! and consistency guarantees.
 
+use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -366,8 +368,10 @@ pub struct ReplicationEncryption {
 impl ReplicationEncryption {
     /// Create new replication encryption manager
     pub fn new(master_key: [u8; 32], crypto: Arc<dyn CryptoBackend>) -> Self {
+        // KDF salt must be drawn from the OS CSPRNG, not fastrand (a
+        // non-cryptographic PRNG).
         let mut salt = [0u8; 16];
-        fastrand::fill(&mut salt);
+        OsRng.fill_bytes(&mut salt);
 
         Self {
             master_key: Zeroizing::new(master_key),
@@ -392,9 +396,10 @@ impl ReplicationEncryption {
                 message: "Key derivation failed".to_string(),
             })?;
 
-        // Generate random IV
+        // Generate random IV from the OS CSPRNG. GCM nonce uniqueness is
+        // security-critical and fastrand is not cryptographically secure.
         let mut iv = vec![0u8; 16];
-        fastrand::fill(&mut iv);
+        OsRng.fill_bytes(&mut iv);
 
         // Encrypt using AES-256-GCM
         let ciphertext = self
@@ -489,12 +494,22 @@ pub struct ReplicationStatusInfo {
     pub node_summary: HashMap<NodeId, NodeReplicationHealth>,
 }
 
+/// Generate a fresh 256-bit replication master key from the OS CSPRNG.
+///
+/// This MUST use a cryptographically secure RNG (`OsRng`). `fastrand` is a
+/// small, non-cryptographic PRNG and must never be used to produce key
+/// material, salts, or nonces.
+fn generate_master_key() -> [u8; 32] {
+    let mut master_key = [0u8; 32];
+    OsRng.fill_bytes(&mut master_key);
+    master_key
+}
+
 impl ReplicationManager {
     /// Create new replication manager
     pub async fn new(config: ClusterConfig, local_hsm: Arc<HsmCore>) -> Result<Self, ClusterError> {
-        // Generate master encryption key
-        let mut master_key = [0u8; 32];
-        fastrand::fill(&mut master_key);
+        // Generate master encryption key from the OS CSPRNG.
+        let master_key = generate_master_key();
 
         let encryption = Arc::new(ReplicationEncryption::new(
             master_key,
@@ -843,5 +858,26 @@ impl ReplicationNetwork for MockReplicationNetwork {
             health: NodeReplicationHealth::Healthy,
             bandwidth_usage: 0.5,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn master_key_is_csprng_random_and_correct_length() {
+        let k1 = generate_master_key();
+        let k2 = generate_master_key();
+
+        // Correct size for AES-256.
+        assert_eq!(k1.len(), 32, "replication master key must be 256 bits");
+
+        // A CSPRNG must not return the all-zero key or repeat across calls.
+        assert_ne!(k1, [0u8; 32], "master key must not be all-zero");
+        assert_ne!(
+            k1, k2,
+            "two independently generated master keys must differ"
+        );
     }
 }

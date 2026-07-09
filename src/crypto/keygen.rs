@@ -44,6 +44,19 @@ pub fn generate_aes_key(key_len_bytes: usize, fips_mode: bool) -> HsmResult<RawK
     Ok(RawKeyMaterial::new(key.to_vec()))
 }
 
+/// Generate a generic secret key of `key_len` bytes (for HMAC / KDF base keys).
+///
+/// HMAC keys must meet the SP 800-107 112-bit (14-byte) floor; a 512-byte
+/// ceiling bounds resource use. Bytes come from the SP 800-90A DRBG.
+pub fn generate_generic_secret(key_len: usize) -> HsmResult<RawKeyMaterial> {
+    if !(14..=512).contains(&key_len) {
+        return Err(HsmError::KeySizeRange);
+    }
+    let mut key = Zeroizing::new(vec![0u8; key_len]);
+    generate_random_bytes(&mut key)?;
+    Ok(RawKeyMaterial::new(key.to_vec()))
+}
+
 /// Generate an RSA key pair. Returns (private_key_der, public_modulus, public_exponent).
 /// If `fips_mode` is true, RSA key sizes below 3072 are rejected per FIPS 140-3.
 pub fn generate_rsa_key_pair(

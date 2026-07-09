@@ -1,10 +1,36 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Craton Software Company
-//! Craton HSM — a PKCS#11 v3.0-compliant Software HSM in pure Rust.
+//! Craton HSM — a PKCS#11-compliant Software HSM in pure Rust.
 //!
 //! This crate provides a complete software HSM implementation with classical
 //! and post-quantum cryptography, FIPS 140-3 readiness, and a C ABI compatible
 //! with any PKCS#11 consumer.
+//!
+//! # Entry points
+//!
+//! - **PKCS#11 C ABI** ([`pkcs11_abi`]): the `cdylib` exports `C_Initialize`,
+//!   `C_GetFunctionList`, `C_GetInterface`, and the rest of the Cryptoki
+//!   surface for use from any PKCS#11 host application. Only one
+//!   `C_Initialize`/`C_Finalize` lifecycle may exist per process.
+//! - **Rust API** ([`core::HsmCore`]): embed the HSM directly; construct with
+//!   [`core::HsmCore::new_default`] or inject a custom [`crypto::backend::CryptoBackend`].
+//! - **Crypto primitives** ([`crypto`]): stateless building blocks used by both.
+//!
+//! # Quick start (Rust API, stateless primitives)
+//!
+//! ```
+//! use craton_hsm::crypto::{keygen, sign};
+//!
+//! // Generate an Ed25519 keypair (private key is mlocked + zeroize-on-drop).
+//! let (private_key, public_key) = keygen::generate_ed25519_key_pair()?;
+//!
+//! let message = b"hello from craton-hsm";
+//! let signature = sign::ed25519_sign(private_key.as_bytes(), message)?;
+//! assert!(sign::ed25519_verify(&public_key, message, &signature)?);
+//! # Ok::<(), craton_hsm::error::HsmError>(())
+//! ```
+//!
+//! Post-quantum equivalents live in [`crypto::pqc`] (ML-KEM, ML-DSA, SLH-DSA).
 
 #![warn(missing_docs)]
 

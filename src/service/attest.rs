@@ -154,6 +154,10 @@ fn platform_and_report(_nonce: &[u8]) -> (&'static str, Vec<u8>) {
             CcPlatform::AwsNitro => "nitro",
             CcPlatform::Software => "software",
         };
+        // The TEE report readers only exist on Linux (/dev/tdx_guest,
+        // /dev/sev-guest, /dev/nsm); elsewhere detect_platform() reports
+        // Software and there is no quote to read.
+        #[cfg(target_os = "linux")]
         let report = match plat {
             CcPlatform::IntelTdx => crate::advanced::attestation::tdx_get_report(_nonce, &[])
                 .unwrap_or_default(),
@@ -163,6 +167,8 @@ fn platform_and_report(_nonce: &[u8]) -> (&'static str, Vec<u8>) {
                 .unwrap_or_default(),
             CcPlatform::Software => Vec::new(),
         };
+        #[cfg(not(target_os = "linux"))]
+        let report = Vec::new();
         return (platform_name, report);
     }
     #[cfg(not(any(

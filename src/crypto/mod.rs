@@ -6,9 +6,12 @@ pub mod backend;
 pub mod derive;
 pub mod digest;
 pub mod drbg;
+pub mod ec_extended;
 pub mod encrypt;
+pub mod hkdf_mech;
 pub mod integrity;
 pub mod keygen;
+pub mod mac;
 pub mod mechanisms;
 pub mod mlock;
 pub mod pairwise_test;
@@ -17,6 +20,7 @@ pub mod pqc;
 pub mod rustcrypto_backend;
 pub mod self_test;
 pub mod sign;
+pub mod sp800_108;
 pub mod wrap;
 
 // ── Cutting-edge crypto modules ───────────────────────────────────────────────
@@ -26,8 +30,8 @@ pub mod wrap;
 #[cfg(feature = "bls-signatures")]
 pub mod bls;
 
-/// Hybrid KEM: X25519 + ML-KEM-768 dual encapsulation (NIST IR 8413 / CNSA 2.0).
-/// Secure against both classical and quantum adversaries.
+/// X-Wing hybrid KEM: X25519 + ML-KEM-768 (draft-connolly-cfrg-xwing-kem-06).
+/// Secure as long as either component holds. EXPERIMENTAL — draft, not final.
 /// Enable with `hybrid-kem` feature.
 #[cfg(feature = "hybrid-kem")]
 pub mod hybrid_kem;

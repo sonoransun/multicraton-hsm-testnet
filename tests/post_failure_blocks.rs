@@ -148,9 +148,9 @@ fn test_post_failed_blocks_all_operations() {
     {
         let mut handle: CK_OBJECT_HANDLE = 0;
         let rv = C_CreateObject(
-            1,            // dummy session handle
+            1,               // dummy session handle
             ptr::null_mut(), // no template
-            0,            // zero attributes
+            0,               // zero attributes
             &mut handle,
         );
         assert_eq!(

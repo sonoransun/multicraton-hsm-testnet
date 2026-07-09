@@ -40,6 +40,7 @@
 
 - [Operator Runbook](operator-runbook.md) — day-to-day operations
 - [Troubleshooting](troubleshooting.md) — common errors, build issues, runtime problems
+- [Performance Tuning](performance-tuning.md) — hardware acceleration, runtime CPU dispatch, `target-cpu=native` guidance
 - [Release Signing](release-signing.md) — GPG, cosign, Authenticode binary verification
 - [Future Work Guide](future-work-guide.md) — PQC upgrades, rand_core unification, FIPS certification, clustering, KMIP
 

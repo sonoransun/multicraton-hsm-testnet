@@ -31,16 +31,70 @@ const AES_CBC_CTR_MAX_PLAINTEXT: usize = 256 * 1024 * 1024; // 256 MiB
 /// prematurely lock out a key or, worse, fail to detect nonce-reuse limits
 /// on a heavily-used key. The hash also avoids storing raw key material in
 /// the map.
-static GCM_ENCRYPT_COUNTERS: std::sync::LazyLock<dashmap::DashMap<[u8; 32], AtomicU64>> =
-    std::sync::LazyLock::new(|| dashmap::DashMap::new());
+static GCM_KEY_STATE: std::sync::LazyLock<dashmap::DashMap<[u8; 32], std::sync::Arc<GcmKeyState>>> =
+    std::sync::LazyLock::new(dashmap::DashMap::new);
 
-/// Per-key random nonce prefixes for AES-GCM.
-/// Each key gets a 4-byte random prefix generated once via DRBG. This prefix
-/// occupies the upper 4 bytes of the 12-byte nonce; the lower 8 bytes are
-/// the monotonic counter. This guarantees nonce uniqueness within a single
-/// HSM lifetime (counter) and across restarts (random prefix).
-static GCM_NONCE_PREFIXES: std::sync::LazyLock<dashmap::DashMap<[u8; 32], [u8; 4]>> =
-    std::sync::LazyLock::new(|| dashmap::DashMap::new());
+/// Per-key AES-GCM nonce state: a 4-byte random prefix (generated once via
+/// DRBG, occupying the upper 4 bytes of the 12-byte nonce) plus the monotonic
+/// encryption counter (lower 8 bytes). Counter uniqueness guarantees no nonce
+/// reuse within an HSM lifetime; the random prefix provides uniqueness across
+/// restarts.
+///
+/// Prefix and counter MUST live in one entry, handed out behind one `Arc`:
+/// an in-flight encryption then always pairs a prefix with a count drawn from
+/// the same state generation. When a reset (`force_reset_all_counters`) races
+/// an encryption, the encryption completes on the old state while new
+/// operations get a fresh prefix and a zeroed counter — with separate maps, a
+/// new prefix could be paired with an old count and the fresh counter would
+/// later re-issue that count, silently reusing a nonce.
+struct GcmKeyState {
+    prefix: [u8; 4],
+    counter: AtomicU64,
+}
+
+/// Fetch (or lazily create) the nonce state for a key.
+fn gcm_key_state(key: &[u8]) -> HsmResult<std::sync::Arc<GcmKeyState>> {
+    let kid = gcm_key_id(key);
+    let entry = GCM_KEY_STATE.entry(kid).or_try_insert_with(
+        || -> HsmResult<std::sync::Arc<GcmKeyState>> {
+            let mut prefix = [0u8; 4];
+            let mut drbg = crate::crypto::drbg::HmacDrbg::new()?;
+            drbg.generate(&mut prefix)?;
+            Ok(std::sync::Arc::new(GcmKeyState {
+                prefix,
+                counter: AtomicU64::new(0),
+            }))
+        },
+    )?;
+    Ok(entry.value().clone())
+}
+
+/// Reserve the next nonce counter value from a key's state, enforcing the
+/// per-key encryption cap. Uses CAS instead of `fetch_add` so the counter
+/// never advances past the limit under concurrency.
+fn gcm_next_count(state: &GcmKeyState) -> HsmResult<u64> {
+    loop {
+        let current = state.counter.load(Ordering::Acquire);
+        if current >= GCM_MAX_RANDOM_NONCE_ENCRYPTIONS {
+            tracing::error!(
+                "AES-GCM per-key encryption limit reached ({} operations) — \
+                 re-key required to prevent nonce reuse. Generate a new AES key \
+                 via C_GenerateKey and destroy the exhausted key via C_DestroyObject.",
+                current
+            );
+            return Err(HsmError::GeneralError);
+        }
+        match state.counter.compare_exchange(
+            current,
+            current + 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(prev) => break Ok(prev),
+            Err(_) => continue, // another thread raced us — retry
+        }
+    }
+}
 
 /// Maximum number of AES-GCM encryptions permitted per key.
 /// With deterministic counter-based nonces, the limit is the counter space
@@ -72,8 +126,7 @@ pub fn reset_gcm_counters() {
 /// counter is tied to the key's lifetime rather than the library lifecycle.
 pub fn remove_gcm_counter(key: &[u8]) {
     let kid = gcm_key_id(key);
-    GCM_ENCRYPT_COUNTERS.remove(&kid);
-    GCM_NONCE_PREFIXES.remove(&kid);
+    GCM_KEY_STATE.remove(&kid);
     // Also remove IV tracking for this key
     CBC_CTR_IV_TRACKER.remove(&kid);
 }
@@ -82,8 +135,9 @@ pub fn remove_gcm_counter(key: &[u8]) {
 /// C_InitToken which destroys all objects on the token, so no keys survive
 /// to be reused.
 pub fn force_reset_all_counters() {
-    GCM_ENCRYPT_COUNTERS.clear();
-    GCM_NONCE_PREFIXES.clear();
+    // Entries are Arc'd: encryptions already in flight finish consistently on
+    // their old (prefix, counter) state; new operations get fresh state.
+    GCM_KEY_STATE.clear();
     reset_iv_trackers();
     tracing::info!(
         "All GCM counters, nonce prefixes, and IV trackers cleared (token re-initialized)."
@@ -110,19 +164,6 @@ fn gcm_key_id(key: &[u8]) -> [u8; 32] {
 /// Uses `entry().or_try_insert_with()` to atomically generate-and-insert,
 /// preventing a TOCTOU race where concurrent first-use of the same key
 /// could generate different prefixes and cause nonce reuse.
-fn gcm_nonce_prefix(key: &[u8]) -> HsmResult<[u8; 4]> {
-    let kid = gcm_key_id(key);
-    let entry = GCM_NONCE_PREFIXES
-        .entry(kid)
-        .or_try_insert_with(|| -> HsmResult<[u8; 4]> {
-            let mut prefix = [0u8; 4];
-            let mut drbg = crate::crypto::drbg::HmacDrbg::new()?;
-            drbg.generate(&mut prefix)?;
-            Ok(prefix)
-        })?;
-    Ok(*entry.value())
-}
-
 // ============================================================================
 // CBC/CTR IV-reuse detection
 // ============================================================================
@@ -234,38 +275,10 @@ pub fn aes_256_gcm_encrypt(key: &[u8], plaintext: &[u8]) -> HsmResult<Vec<u8>> {
     }
 
     // Enforce per-key nonce-reuse safety limit (per NIST SP 800-38D).
-    //
-    // Uses a CAS loop instead of fetch_add to prevent the counter from advancing
-    // past the limit. With fetch_add, concurrent threads could all increment past
-    // the limit before any of them checks the result, and the counter would never
-    // roll back. The CAS loop ensures the counter only advances if the new value
-    // is within bounds.
-    let kid = gcm_key_id(key);
-    let counter = GCM_ENCRYPT_COUNTERS
-        .entry(kid)
-        .or_insert_with(|| AtomicU64::new(0));
-
-    let count = loop {
-        let current = counter.value().load(Ordering::Acquire);
-        if current >= GCM_MAX_RANDOM_NONCE_ENCRYPTIONS {
-            tracing::error!(
-                "AES-GCM per-key encryption limit reached ({} operations) — \
-                 re-key required to prevent nonce reuse. Generate a new AES key \
-                 via C_GenerateKey and destroy the exhausted key via C_DestroyObject.",
-                current
-            );
-            return Err(HsmError::GeneralError);
-        }
-        match counter.value().compare_exchange(
-            current,
-            current + 1,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(prev) => break prev,
-            Err(_) => continue, // another thread raced us — retry
-        }
-    };
+    // Prefix and count come from ONE state snapshot (see GcmKeyState) so a
+    // concurrent reset cannot mix generations and reuse a nonce.
+    let state = gcm_key_state(key)?;
+    let count = gcm_next_count(&state)?;
 
     // Warn at 75% of the limit so operators have time to rotate keys
     // before hitting the hard cap (~500M operations of runway).
@@ -283,14 +296,9 @@ pub fn aes_256_gcm_encrypt(key: &[u8], plaintext: &[u8]) -> HsmResult<Vec<u8>> {
     let aes_key = Key::<Aes256Gcm>::from_slice(key);
     let cipher = Aes256Gcm::new(aes_key);
 
-    // Build deterministic nonce: random_prefix (4 bytes) || counter (8 bytes).
-    // The random prefix is generated once per key via DRBG and cached.
-    // The counter is monotonically increasing and unique per encryption,
-    // so nonce collisions are impossible within a single HSM lifetime.
-    // The random prefix provides uniqueness across restarts.
-    let prefix = gcm_nonce_prefix(key)?;
+    // Deterministic nonce: random_prefix (4 bytes) || counter (8 bytes).
     let mut nonce_bytes = [0u8; 12];
-    nonce_bytes[..4].copy_from_slice(&prefix);
+    nonce_bytes[..4].copy_from_slice(&state.prefix);
     nonce_bytes[4..].copy_from_slice(&count.to_be_bytes());
     let nonce = Nonce::from_slice(&nonce_bytes);
 
@@ -326,26 +334,10 @@ pub fn aes_256_gcm_encrypt_with_aad(
         return Err(HsmError::DataLenRange);
     }
 
-    let kid = gcm_key_id(key);
-    let counter = GCM_ENCRYPT_COUNTERS
-        .entry(kid)
-        .or_insert_with(|| AtomicU64::new(0));
-
-    let count = loop {
-        let current = counter.value().load(Ordering::Acquire);
-        if current >= GCM_MAX_RANDOM_NONCE_ENCRYPTIONS {
-            return Err(HsmError::GeneralError);
-        }
-        match counter.value().compare_exchange(
-            current,
-            current + 1,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(prev) => break prev,
-            Err(_) => continue,
-        }
-    };
+    // Single state snapshot: see GcmKeyState for why prefix + counter must
+    // come from one entry.
+    let state = gcm_key_state(key)?;
+    let count = gcm_next_count(&state)?;
 
     const GCM_WARN_THRESHOLD: u64 = GCM_MAX_RANDOM_NONCE_ENCRYPTIONS * 3 / 4;
     if count == GCM_WARN_THRESHOLD {
@@ -356,9 +348,8 @@ pub fn aes_256_gcm_encrypt_with_aad(
     let cipher = Aes256Gcm::new(aes_key);
 
     // Deterministic nonce: random_prefix (4 bytes) || counter (8 bytes)
-    let prefix = gcm_nonce_prefix(key)?;
     let mut nonce_bytes = [0u8; 12];
-    nonce_bytes[..4].copy_from_slice(&prefix);
+    nonce_bytes[..4].copy_from_slice(&state.prefix);
     nonce_bytes[4..].copy_from_slice(&count.to_be_bytes());
     let nonce = Nonce::from_slice(&nonce_bytes);
 
@@ -427,6 +418,223 @@ pub fn aes_256_gcm_decrypt_with_aad(key: &[u8], data: &[u8], aad: &[u8]) -> HsmR
     cipher
         .decrypt(nonce, payload)
         .map_err(|_| HsmError::EncryptedDataInvalid)
+}
+
+// ============================================================================
+// AES-GCM with caller-supplied parameters (PKCS#11 CK_GCM_PARAMS)
+// ============================================================================
+//
+// Unlike the legacy `aes_256_gcm_*` helpers above (which prepend an
+// internally-generated nonce and only support 256-bit keys), these functions
+// honor the caller's IV, AAD, and tag length, support 128/192/256-bit keys,
+// and return the bare `ciphertext || tag` with NO nonce prefix — the caller
+// already knows the IV. This is the PKCS#11-conformant contract.
+
+/// Permitted AES-GCM authentication tag lengths, in bits.
+const GCM_VALID_TAG_BITS: [u32; 5] = [96, 104, 112, 120, 128];
+
+/// Required IV length in bytes. Restricted to the SP 800-38D–recommended
+/// 96-bit nonce, which is what conforming PKCS#11 clients send; other lengths
+/// require GHASH-based IV derivation and are a documented follow-up.
+const GCM_REQUIRED_IV_LEN: usize = 12;
+
+macro_rules! gcm_run {
+    (enc, $aes:ty, $tag:ty, $key:expr, $iv:expr, $aad:expr, $data:expr) => {{
+        type C = aes_gcm::AesGcm<$aes, aes_gcm::aead::consts::U12, $tag>;
+        let cipher =
+            <C as aes_gcm::KeyInit>::new_from_slice($key).map_err(|_| HsmError::KeySizeRange)?;
+        let nonce = aes_gcm::Nonce::<aes_gcm::aead::consts::U12>::from_slice($iv);
+        aes_gcm::aead::Aead::encrypt(
+            &cipher,
+            nonce,
+            aes_gcm::aead::Payload {
+                msg: $data,
+                aad: $aad,
+            },
+        )
+        .map_err(|_| HsmError::GeneralError)
+    }};
+    (dec, $aes:ty, $tag:ty, $key:expr, $iv:expr, $aad:expr, $data:expr) => {{
+        type C = aes_gcm::AesGcm<$aes, aes_gcm::aead::consts::U12, $tag>;
+        let cipher =
+            <C as aes_gcm::KeyInit>::new_from_slice($key).map_err(|_| HsmError::KeySizeRange)?;
+        let nonce = aes_gcm::Nonce::<aes_gcm::aead::consts::U12>::from_slice($iv);
+        aes_gcm::aead::Aead::decrypt(
+            &cipher,
+            nonce,
+            aes_gcm::aead::Payload {
+                msg: $data,
+                aad: $aad,
+            },
+        )
+        .map_err(|_| HsmError::EncryptedDataInvalid)
+    }};
+}
+
+/// Dispatch over (key length, tag bits) for AES-GCM. `dir` is `enc` or `dec`.
+macro_rules! gcm_dispatch {
+    ($dir:tt, $key:expr, $iv:expr, $aad:expr, $data:expr, $tag_bits:expr) => {{
+        use aes_gcm::aead::consts::{U12, U13, U14, U15, U16};
+        use aes_gcm::aes::{Aes128, Aes192, Aes256};
+        match ($key.len(), $tag_bits) {
+            (16, 96) => gcm_run!($dir, Aes128, U12, $key, $iv, $aad, $data),
+            (16, 104) => gcm_run!($dir, Aes128, U13, $key, $iv, $aad, $data),
+            (16, 112) => gcm_run!($dir, Aes128, U14, $key, $iv, $aad, $data),
+            (16, 120) => gcm_run!($dir, Aes128, U15, $key, $iv, $aad, $data),
+            (16, 128) => gcm_run!($dir, Aes128, U16, $key, $iv, $aad, $data),
+            (24, 96) => gcm_run!($dir, Aes192, U12, $key, $iv, $aad, $data),
+            (24, 104) => gcm_run!($dir, Aes192, U13, $key, $iv, $aad, $data),
+            (24, 112) => gcm_run!($dir, Aes192, U14, $key, $iv, $aad, $data),
+            (24, 120) => gcm_run!($dir, Aes192, U15, $key, $iv, $aad, $data),
+            (24, 128) => gcm_run!($dir, Aes192, U16, $key, $iv, $aad, $data),
+            (32, 96) => gcm_run!($dir, Aes256, U12, $key, $iv, $aad, $data),
+            (32, 104) => gcm_run!($dir, Aes256, U13, $key, $iv, $aad, $data),
+            (32, 112) => gcm_run!($dir, Aes256, U14, $key, $iv, $aad, $data),
+            (32, 120) => gcm_run!($dir, Aes256, U15, $key, $iv, $aad, $data),
+            (32, 128) => gcm_run!($dir, Aes256, U16, $key, $iv, $aad, $data),
+            (16, _) | (24, _) | (32, _) => Err(HsmError::MechanismParamInvalid),
+            _ => Err(HsmError::KeySizeRange),
+        }
+    }};
+}
+
+/// Validate the common AES-GCM parameters (key size, IV length, tag bits).
+fn validate_gcm_params(key: &[u8], iv: &[u8], tag_bits: u32) -> HsmResult<()> {
+    if !matches!(key.len(), 16 | 24 | 32) {
+        return Err(HsmError::KeySizeRange);
+    }
+    if iv.len() != GCM_REQUIRED_IV_LEN {
+        return Err(HsmError::MechanismParamInvalid);
+    }
+    if !GCM_VALID_TAG_BITS.contains(&tag_bits) {
+        return Err(HsmError::MechanismParamInvalid);
+    }
+    Ok(())
+}
+
+/// AES-GCM encrypt with caller-supplied IV, AAD, and tag length.
+///
+/// Supports 128/192/256-bit keys and 96–128-bit tags. Returns
+/// `ciphertext || tag` (no nonce prefix). The caller is responsible for IV
+/// uniqueness; [`gcm_caller_iv_is_fresh`] provides best-effort reuse detection.
+pub fn aes_gcm_encrypt(
+    key: &[u8],
+    iv: &[u8],
+    aad: &[u8],
+    plaintext: &[u8],
+    tag_bits: u32,
+) -> HsmResult<Vec<u8>> {
+    validate_gcm_params(key, iv, tag_bits)?;
+    if plaintext.len() > AES_GCM_MAX_PLAINTEXT {
+        return Err(HsmError::DataLenRange);
+    }
+    gcm_dispatch!(enc, key, iv, aad, plaintext, tag_bits)
+}
+
+/// AES-GCM decrypt with caller-supplied IV, AAD, and tag length.
+///
+/// `data` is `ciphertext || tag`. Returns the recovered plaintext, or
+/// [`HsmError::EncryptedDataInvalid`] on authentication failure.
+pub fn aes_gcm_decrypt(
+    key: &[u8],
+    iv: &[u8],
+    aad: &[u8],
+    data: &[u8],
+    tag_bits: u32,
+) -> HsmResult<Vec<u8>> {
+    validate_gcm_params(key, iv, tag_bits)?;
+    let tag_bytes = (tag_bits / 8) as usize;
+    if data.len() < tag_bytes {
+        return Err(HsmError::EncryptedDataInvalid);
+    }
+    gcm_dispatch!(dec, key, iv, aad, data, tag_bits)
+}
+
+/// Per-key record of caller-supplied AES-GCM IVs, for best-effort reuse
+/// detection. Keyed by SHA-256(key) so no raw key material is stored.
+static GCM_CALLER_IV_TRACKER: std::sync::LazyLock<dashmap::DashMap<[u8; 32], HashSet<Vec<u8>>>> =
+    std::sync::LazyLock::new(dashmap::DashMap::new);
+
+/// Record a caller-supplied GCM IV and report whether it is fresh for this key.
+///
+/// Returns `false` if the (key, IV) pair has been seen before this
+/// C_Initialize lifecycle — nonce reuse is catastrophic for GCM
+/// confidentiality and integrity, so callers must reject a `false` result.
+pub fn gcm_caller_iv_is_fresh(key: &[u8], iv: &[u8]) -> bool {
+    let kid = gcm_key_id(key);
+    let mut set = GCM_CALLER_IV_TRACKER.entry(kid).or_default();
+    set.insert(iv.to_vec())
+}
+
+/// Clear the caller-IV tracker. Called on C_Initialize / token re-init.
+pub fn reset_gcm_caller_iv_tracker() {
+    GCM_CALLER_IV_TRACKER.clear();
+}
+
+#[cfg(test)]
+mod gcm_params_tests {
+    use super::*;
+
+    // NIST CAVP AES-GCM test vector (gcmEncryptExtIV256, first vector with
+    // 96-bit IV, 128-bit tag, empty AAD/PT). Key/IV/CT/tag from the CAVS set.
+    #[test]
+    fn nist_aes256_gcm_empty() {
+        let key = hex_lit(b"b52c505a37d78eda5dd34f20c22540ea1b58963cf8e5bf8ffa85f9f2492505b4");
+        let iv = hex_lit(b"516c33929df5a3284ff463d7");
+        // Expected tag for empty PT/AAD.
+        let expected_tag = hex_lit(b"bdc1ac884d332457a1d2664f168c76f0");
+        let out = aes_gcm_encrypt(&key, &iv, &[], &[], 128).expect("encrypt");
+        assert_eq!(out, expected_tag);
+        let pt = aes_gcm_decrypt(&key, &iv, &[], &out, 128).expect("decrypt");
+        assert!(pt.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_all_key_sizes_with_aad() {
+        for &klen in &[16usize, 24, 32] {
+            let key = vec![0x11u8; klen];
+            let iv = [0x22u8; 12];
+            let aad = b"context-binding";
+            let pt = b"secret payload";
+            let ct = aes_gcm_encrypt(&key, &iv, aad, pt, 128).expect("enc");
+            let back = aes_gcm_decrypt(&key, &iv, aad, &ct, 128).expect("dec");
+            assert_eq!(back, pt);
+            // Wrong AAD fails authentication.
+            assert!(aes_gcm_decrypt(&key, &iv, b"other", &ct, 128).is_err());
+        }
+    }
+
+    #[test]
+    fn truncated_tags_roundtrip() {
+        let key = [0x33u8; 32];
+        let iv = [0x44u8; 12];
+        for &tb in &[96u32, 104, 112, 120, 128] {
+            let ct = aes_gcm_encrypt(&key, &iv, &[], b"data", tb).expect("enc");
+            // ciphertext(4) + tag(tb/8)
+            assert_eq!(ct.len(), 4 + (tb / 8) as usize);
+            let back = aes_gcm_decrypt(&key, &iv, &[], &ct, tb).expect("dec");
+            assert_eq!(back, b"data");
+        }
+    }
+
+    #[test]
+    fn invalid_params_rejected() {
+        let key = [0u8; 32];
+        assert!(aes_gcm_encrypt(&key, &[0u8; 8], &[], b"x", 128).is_err()); // short IV
+        assert!(aes_gcm_encrypt(&key, &[0u8; 12], &[], b"x", 64).is_err()); // bad tag
+        assert!(aes_gcm_encrypt(&[0u8; 20], &[0u8; 12], &[], b"x", 128).is_err());
+        // bad key
+    }
+
+    fn hex_lit(h: &[u8]) -> Vec<u8> {
+        (0..h.len() / 2)
+            .map(|i| {
+                let hi = (h[2 * i] as char).to_digit(16).unwrap();
+                let lo = (h[2 * i + 1] as char).to_digit(16).unwrap();
+                (hi * 16 + lo) as u8
+            })
+            .collect()
+    }
 }
 
 // ============================================================================

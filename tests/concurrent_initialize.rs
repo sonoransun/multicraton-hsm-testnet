@@ -47,7 +47,8 @@ fn test_concurrent_initialize_finalize_no_corruption() {
         .collect();
 
     for h in handles {
-        h.join().expect("thread panicked during concurrent init/finalize");
+        h.join()
+            .expect("thread panicked during concurrent init/finalize");
     }
 
     // Ensure we're in a clean state — finalize if still initialized

@@ -155,14 +155,18 @@ pub trait CryptoBackend: Send + Sync {
         modulus: &[u8],
         public_exponent: &[u8],
         plaintext: &[u8],
-        hash_alg: super::sign::OaepHash,
+        hash: super::sign::OaepHash,
+        mgf: super::sign::OaepHash,
+        label: &[u8],
     ) -> HsmResult<Vec<u8>>;
 
     fn rsa_oaep_decrypt(
         &self,
         private_key_der: &[u8],
         ciphertext: &[u8],
-        hash_alg: super::sign::OaepHash,
+        hash: super::sign::OaepHash,
+        mgf: super::sign::OaepHash,
+        label: &[u8],
     ) -> HsmResult<Vec<u8>>;
 
     // ========================================================================

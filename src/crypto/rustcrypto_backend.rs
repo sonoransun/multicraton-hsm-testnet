@@ -223,9 +223,11 @@ impl CryptoBackend for RustCryptoBackend {
         modulus: &[u8],
         public_exponent: &[u8],
         plaintext: &[u8],
-        hash_alg: super::sign::OaepHash,
+        hash: super::sign::OaepHash,
+        mgf: super::sign::OaepHash,
+        label: &[u8],
     ) -> HsmResult<Vec<u8>> {
-        super::sign::rsa_oaep_encrypt(modulus, public_exponent, plaintext, hash_alg)
+        super::sign::rsa_oaep_encrypt(modulus, public_exponent, plaintext, hash, mgf, label)
             .map(|cipher_buf| cipher_buf.into_iter().collect())
     }
 
@@ -233,9 +235,11 @@ impl CryptoBackend for RustCryptoBackend {
         &self,
         private_key_der: &[u8],
         ciphertext: &[u8],
-        hash_alg: super::sign::OaepHash,
+        hash: super::sign::OaepHash,
+        mgf: super::sign::OaepHash,
+        label: &[u8],
     ) -> HsmResult<Vec<u8>> {
-        super::sign::rsa_oaep_decrypt(private_key_der, ciphertext, hash_alg)
+        super::sign::rsa_oaep_decrypt(private_key_der, ciphertext, hash, mgf, label)
     }
 
     // ========================================================================

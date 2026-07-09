@@ -3,7 +3,7 @@
 use crate::error::{HsmError, HsmResult};
 use crate::pkcs11_abi::constants::*;
 use crate::pkcs11_abi::types::CK_MECHANISM_TYPE;
-use sha2::{Digest, Sha256, Sha384, Sha512};
+use sha2::{Digest, Sha224, Sha256, Sha384, Sha512, Sha512_224, Sha512_256};
 
 /// Size of the scratch buffer used for zeroizing hasher state on drop.
 /// Must be >= the largest internal state of any supported hash function.
@@ -28,9 +28,12 @@ pub fn compute_digest(mechanism: CK_MECHANISM_TYPE, data: &[u8]) -> HsmResult<Ve
             use sha1::Sha1;
             Ok(Sha1::digest(data).to_vec())
         }
+        CKM_SHA224 => Ok(Sha224::digest(data).to_vec()),
         CKM_SHA256 => Ok(Sha256::digest(data).to_vec()),
         CKM_SHA384 => Ok(Sha384::digest(data).to_vec()),
         CKM_SHA512 => Ok(Sha512::digest(data).to_vec()),
+        CKM_SHA512_224 => Ok(Sha512_224::digest(data).to_vec()),
+        CKM_SHA512_256 => Ok(Sha512_256::digest(data).to_vec()),
         CKM_SHA3_256 => {
             use sha3::Sha3_256;
             Ok(Sha3_256::digest(data).to_vec())
@@ -51,7 +54,8 @@ pub fn compute_digest(mechanism: CK_MECHANISM_TYPE, data: &[u8]) -> HsmResult<Ve
 pub fn digest_output_len(mechanism: CK_MECHANISM_TYPE) -> HsmResult<usize> {
     match mechanism {
         CKM_SHA_1 => Ok(20),
-        CKM_SHA256 | CKM_SHA3_256 => Ok(32),
+        CKM_SHA224 | CKM_SHA512_224 => Ok(28),
+        CKM_SHA256 | CKM_SHA3_256 | CKM_SHA512_256 => Ok(32),
         CKM_SHA384 | CKM_SHA3_384 => Ok(48),
         CKM_SHA512 | CKM_SHA3_512 => Ok(64),
         _ => Err(HsmError::MechanismInvalid),
@@ -69,9 +73,12 @@ pub fn create_hasher(mechanism: CK_MECHANISM_TYPE) -> HsmResult<Box<dyn DigestAc
             use sha1::Sha1;
             Ok(Box::new(GenericHasher::<Sha1>::new()))
         }
+        CKM_SHA224 => Ok(Box::new(GenericHasher::<Sha224>::new())),
         CKM_SHA256 => Ok(Box::new(GenericHasher::<Sha256>::new())),
         CKM_SHA384 => Ok(Box::new(GenericHasher::<Sha384>::new())),
         CKM_SHA512 => Ok(Box::new(GenericHasher::<Sha512>::new())),
+        CKM_SHA512_224 => Ok(Box::new(GenericHasher::<Sha512_224>::new())),
+        CKM_SHA512_256 => Ok(Box::new(GenericHasher::<Sha512_256>::new())),
         CKM_SHA3_256 => {
             use sha3::Sha3_256;
             Ok(Box::new(GenericHasher::<Sha3_256>::new()))

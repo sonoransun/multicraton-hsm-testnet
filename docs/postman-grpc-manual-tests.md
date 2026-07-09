@@ -17,7 +17,7 @@ Two environments are provided:
 | Environment | Endpoint | Use case |
 |-------------|----------|----------|
 | **default** | `http://localhost:9898` | Local development |
-| **remote** | `http://185.177.116.16:9898` | Remote test server |
+| **remote** | `https://your-remote-hsm-host:9898` | Remote test server |
 
 Select the environment in the Kreya environment dropdown before running tests.
 

@@ -60,7 +60,7 @@ const DEFAULT_MAX_BACKUP_AGE_SECS: u64 = 30 * 24 * 3600;
 ///
 /// `pbkdf2_iterations`: if `Some`, uses the given iteration count for key
 /// derivation (should match the runtime config). Falls back to the crate
-/// default (600k) if `None`.
+/// default (1,000,000) if `None`.
 ///
 /// The backup is encrypted with AES-256-GCM using a key derived from
 /// the passphrase via PBKDF2-HMAC-SHA256.

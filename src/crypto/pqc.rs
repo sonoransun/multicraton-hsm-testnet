@@ -19,7 +19,7 @@ pub(crate) struct PqcDrbgRng {
 }
 
 impl PqcDrbgRng {
-    fn new() -> HsmResult<Self> {
+    pub(crate) fn new() -> HsmResult<Self> {
         Ok(Self {
             drbg: crate::crypto::drbg::HmacDrbg::new()?,
         })
@@ -96,36 +96,70 @@ pub fn ml_kem_keygen(variant: MlKemVariant) -> HsmResult<(RawKeyMaterial, Vec<u8
     let mut seed_bytes = Zeroizing::new([0u8; 64]);
     let mut drbg = crate::crypto::drbg::HmacDrbg::new()?;
     drbg.generate(&mut *seed_bytes)?;
+    ml_kem_expand_seed(*seed_bytes, variant)
+}
+
+/// Deterministically expand a stored 64-byte ML-KEM seed (d||z) into
+/// (dk_seed, ek_bytes), per FIPS 203 KeyGen_internal.
+///
+/// Used to re-derive public material from stored private seeds and by the
+/// fixed-vector self-tests. The returned seed equals the input.
+pub fn ml_kem_expand_seed(
+    seed_bytes: [u8; 64],
+    variant: MlKemVariant,
+) -> HsmResult<(RawKeyMaterial, Vec<u8>)> {
+    use zeroize::Zeroizing;
+    let seed_bytes = Zeroizing::new(seed_bytes);
     let seed: ml_kem::Seed = (*seed_bytes).into();
 
+    macro_rules! expand {
+        ($param:ty) => {{
+            let dk = ml_kem::DecapsulationKey::<$param>::from_seed(seed);
+            let ek = dk.encapsulation_key();
+            let stored_seed = dk.to_seed().ok_or(HsmError::GeneralError)?;
+            Ok((
+                RawKeyMaterial::new(stored_seed[..].to_vec()),
+                ek.to_bytes()[..].to_vec(),
+            ))
+        }};
+    }
+
     match variant {
-        MlKemVariant::MlKem512 => {
-            let dk = ml_kem::DecapsulationKey::<ml_kem::MlKem512>::from_seed(seed);
-            let ek = dk.encapsulation_key();
-            let stored_seed = dk.to_seed().ok_or(HsmError::GeneralError)?;
+        MlKemVariant::MlKem512 => expand!(ml_kem::MlKem512),
+        MlKemVariant::MlKem768 => expand!(ml_kem::MlKem768),
+        MlKemVariant::MlKem1024 => expand!(ml_kem::MlKem1024),
+    }
+}
+
+/// Deterministically expand a stored 32-byte ML-DSA seed (ξ) into
+/// (seed, verifying_key_bytes), per FIPS 204 KeyGen_internal.
+///
+/// Used to re-derive public material from stored private seeds and by the
+/// fixed-vector self-tests. The returned seed equals the input.
+pub fn ml_dsa_expand_seed(
+    seed_bytes: [u8; 32],
+    variant: MlDsaVariant,
+) -> HsmResult<(RawKeyMaterial, Vec<u8>)> {
+    use ml_dsa::Keypair;
+    use zeroize::Zeroizing;
+    let seed_bytes = Zeroizing::new(seed_bytes);
+    let seed: ml_dsa::Seed = (*seed_bytes).into();
+
+    macro_rules! expand {
+        ($param:ty) => {{
+            let sk = ml_dsa::SigningKey::<$param>::from_seed(&seed);
+            let vk_bytes = sk.verifying_key().encode();
             Ok((
-                RawKeyMaterial::new(stored_seed[..].to_vec()),
-                ek.to_bytes()[..].to_vec(),
+                RawKeyMaterial::new(seed[..].to_vec()),
+                vk_bytes[..].to_vec(),
             ))
-        }
-        MlKemVariant::MlKem768 => {
-            let dk = ml_kem::DecapsulationKey::<ml_kem::MlKem768>::from_seed(seed);
-            let ek = dk.encapsulation_key();
-            let stored_seed = dk.to_seed().ok_or(HsmError::GeneralError)?;
-            Ok((
-                RawKeyMaterial::new(stored_seed[..].to_vec()),
-                ek.to_bytes()[..].to_vec(),
-            ))
-        }
-        MlKemVariant::MlKem1024 => {
-            let dk = ml_kem::DecapsulationKey::<ml_kem::MlKem1024>::from_seed(seed);
-            let ek = dk.encapsulation_key();
-            let stored_seed = dk.to_seed().ok_or(HsmError::GeneralError)?;
-            Ok((
-                RawKeyMaterial::new(stored_seed[..].to_vec()),
-                ek.to_bytes()[..].to_vec(),
-            ))
-        }
+        }};
+    }
+
+    match variant {
+        MlDsaVariant::MlDsa44 => expand!(ml_dsa::MlDsa44),
+        MlDsaVariant::MlDsa65 => expand!(ml_dsa::MlDsa65),
+        MlDsaVariant::MlDsa87 => expand!(ml_dsa::MlDsa87),
     }
 }
 
@@ -222,40 +256,14 @@ pub enum MlDsaVariant {
 
 /// Generate an ML-DSA keypair. Returns (signing_key_seed_32bytes, verifying_key_bytes).
 pub fn ml_dsa_keygen(variant: MlDsaVariant) -> HsmResult<(RawKeyMaterial, Vec<u8>)> {
-    use ml_dsa::signature::Keypair;
-    use ml_dsa::KeyGen;
+    use zeroize::Zeroizing;
 
-    let mut rng = new_rng()?;
-
-    match variant {
-        MlDsaVariant::MlDsa44 => {
-            let kp = ml_dsa::MlDsa44::key_gen(&mut rng);
-            let seed = kp.to_seed();
-            let vk_bytes = kp.verifying_key().encode();
-            Ok((
-                RawKeyMaterial::new(seed[..].to_vec()),
-                vk_bytes[..].to_vec(),
-            ))
-        }
-        MlDsaVariant::MlDsa65 => {
-            let kp = ml_dsa::MlDsa65::key_gen(&mut rng);
-            let seed = kp.to_seed();
-            let vk_bytes = kp.verifying_key().encode();
-            Ok((
-                RawKeyMaterial::new(seed[..].to_vec()),
-                vk_bytes[..].to_vec(),
-            ))
-        }
-        MlDsaVariant::MlDsa87 => {
-            let kp = ml_dsa::MlDsa87::key_gen(&mut rng);
-            let seed = kp.to_seed();
-            let vk_bytes = kp.verifying_key().encode();
-            Ok((
-                RawKeyMaterial::new(seed[..].to_vec()),
-                vk_bytes[..].to_vec(),
-            ))
-        }
-    }
+    // FIPS 204 Algorithm 1: draw the 32-byte seed ξ from an approved RBG,
+    // then expand deterministically via KeyGen_internal (SigningKey::from_seed).
+    let mut seed_bytes = Zeroizing::new([0u8; 32]);
+    let mut drbg = crate::crypto::drbg::HmacDrbg::new()?;
+    drbg.generate(&mut *seed_bytes)?;
+    ml_dsa_expand_seed(*seed_bytes, variant)
 }
 
 /// ML-DSA sign a message. signing_key_seed is the 32-byte seed.
@@ -264,30 +272,33 @@ pub fn ml_dsa_sign(
     data: &[u8],
     variant: MlDsaVariant,
 ) -> HsmResult<Vec<u8>> {
-    use ml_dsa::signature::Signer;
-    use ml_dsa::KeyGen;
-
     use zeroize::Zeroizing;
     let seed: &[u8; 32] = signing_key_seed
         .try_into()
         .map_err(|_| HsmError::KeyHandleInvalid)?;
     let seed_zeroizing = Zeroizing::new(*seed);
-    let seed_arr: ml_dsa::B32 = (*seed_zeroizing).into();
+    let seed_arr: ml_dsa::Seed = (*seed_zeroizing).into();
 
     match variant {
         MlDsaVariant::MlDsa44 => {
-            let kp = ml_dsa::MlDsa44::from_seed(&seed_arr);
-            let sig = kp.signing_key().sign(data);
+            let sk = ml_dsa::ExpandedSigningKey::<ml_dsa::MlDsa44>::from_seed(&seed_arr);
+            let sig = sk
+                .sign_deterministic(data, &[])
+                .map_err(|_| HsmError::GeneralError)?;
             Ok(sig.encode()[..].to_vec())
         }
         MlDsaVariant::MlDsa65 => {
-            let kp = ml_dsa::MlDsa65::from_seed(&seed_arr);
-            let sig = kp.signing_key().sign(data);
+            let sk = ml_dsa::ExpandedSigningKey::<ml_dsa::MlDsa65>::from_seed(&seed_arr);
+            let sig = sk
+                .sign_deterministic(data, &[])
+                .map_err(|_| HsmError::GeneralError)?;
             Ok(sig.encode()[..].to_vec())
         }
         MlDsaVariant::MlDsa87 => {
-            let kp = ml_dsa::MlDsa87::from_seed(&seed_arr);
-            let sig = kp.signing_key().sign(data);
+            let sk = ml_dsa::ExpandedSigningKey::<ml_dsa::MlDsa87>::from_seed(&seed_arr);
+            let sig = sk
+                .sign_deterministic(data, &[])
+                .map_err(|_| HsmError::GeneralError)?;
             Ok(sig.encode()[..].to_vec())
         }
     }

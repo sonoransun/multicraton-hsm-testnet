@@ -17,8 +17,16 @@
 
 use crate::error::HsmResult;
 
+/// Serializes POST execution within the process. The CBC/CTR KATs use fixed
+/// keys and IVs, so two POSTs racing (possible via the Rust API — the C ABI
+/// serializes C_Initialize) would trip the global IV-reuse tracker and fail
+/// spuriously.
+static POST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 /// Run all POST known-answer tests. Returns Ok(()) if all pass.
 pub fn run_post() -> HsmResult<()> {
+    let _guard = POST_LOCK.lock();
+
     // Reset IV-reuse trackers and GCM counters so that KATs can run
     // deterministically with fixed IVs/nonces. This is safe because POST
     // is called on initialization, before any user operations.

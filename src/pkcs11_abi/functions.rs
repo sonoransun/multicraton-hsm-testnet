@@ -56,6 +56,7 @@ use crate::crypto::backend::CryptoBackend;
 use crate::crypto::{mechanisms, pairwise_test, pqc, sign};
 use crate::error::{HsmError, HsmResult};
 use crate::pkcs11_abi::constants::*;
+use crate::pkcs11_abi::params;
 use crate::pkcs11_abi::types::*;
 use crate::session::session::{ActiveOperation, FindContext};
 use crate::store::key_material::RawKeyMaterial;
@@ -204,29 +205,89 @@ pub(crate) fn err_to_rv(e: HsmError) -> CK_RV {
     e.into()
 }
 
-/// Parse OAEP hash algorithm from CK_RSA_PKCS_OAEP_PARAMS mechanism parameter bytes.
-/// The first CK_ULONG in the struct is hashAlg. Returns error for unrecognized or missing hash.
-fn parse_oaep_hash(mech_param: &[u8]) -> Result<crate::crypto::sign::OaepHash, CK_RV> {
+/// Map an OAEP hash mechanism (`CKM_SHA*`) to `OaepHash`. SHA-1 and any other
+/// value are rejected.
+fn oaep_hash_from_ckm(mech: CK_ULONG) -> Result<crate::crypto::sign::OaepHash, CK_RV> {
     use crate::crypto::sign::OaepHash;
-    if mech_param.len() >= std::mem::size_of::<CK_ULONG>() {
-        let hash_mech = CK_ULONG::from_ne_bytes(
-            match mech_param[..std::mem::size_of::<CK_ULONG>()].try_into() {
-                Ok(b) => b,
-                Err(_) => return Err(CKR_MECHANISM_PARAM_INVALID),
-            },
-        );
-        match hash_mech {
-            CKM_SHA_1 => {
-                tracing::error!("RSA-OAEP with SHA-1 is rejected — use SHA-256 or stronger");
-                Err(CKR_MECHANISM_PARAM_INVALID)
-            }
-            CKM_SHA256 => Ok(OaepHash::Sha256),
-            CKM_SHA384 => Ok(OaepHash::Sha384),
-            CKM_SHA512 => Ok(OaepHash::Sha512),
-            _ => Err(CKR_MECHANISM_PARAM_INVALID),
+    match mech {
+        CKM_SHA_1 => {
+            tracing::error!("RSA-OAEP with SHA-1 is rejected — use SHA-256 or stronger");
+            Err(CKR_MECHANISM_PARAM_INVALID)
         }
+        CKM_SHA256 => Ok(OaepHash::Sha256),
+        CKM_SHA384 => Ok(OaepHash::Sha384),
+        CKM_SHA512 => Ok(OaepHash::Sha512),
+        _ => Err(CKR_MECHANISM_PARAM_INVALID),
+    }
+}
+
+/// Map an MGF type (`CKG_MGF1_SHA*`) to `OaepHash`. SHA-1 and any other value
+/// are rejected.
+fn oaep_mgf_from_ckg(mgf: CK_ULONG) -> Result<crate::crypto::sign::OaepHash, CK_RV> {
+    use crate::crypto::sign::OaepHash;
+    match mgf {
+        CKG_MGF1_SHA256 => Ok(OaepHash::Sha256),
+        CKG_MGF1_SHA384 => Ok(OaepHash::Sha384),
+        CKG_MGF1_SHA512 => Ok(OaepHash::Sha512),
+        _ => Err(CKR_MECHANISM_PARAM_INVALID),
+    }
+}
+
+/// Legacy OAEP parameter: a bare `CKM_*` hashAlg ulong (no MGF/label struct).
+/// Retained for backward compatibility with callers that never passed the full
+/// `CK_RSA_PKCS_OAEP_PARAMS`.
+fn parse_oaep_hash_legacy(mech_param: &[u8]) -> Result<crate::crypto::sign::OaepHash, CK_RV> {
+    if mech_param.len() < std::mem::size_of::<CK_ULONG>() {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    let hash_mech = CK_ULONG::from_ne_bytes(
+        mech_param[..std::mem::size_of::<CK_ULONG>()]
+            .try_into()
+            .map_err(|_| CKR_MECHANISM_PARAM_INVALID)?,
+    );
+    oaep_hash_from_ckm(hash_mech)
+}
+
+/// Parse + validate the OAEP mechanism parameter (a conforming
+/// `CK_RSA_PKCS_OAEP_PARAMS`, or a legacy bare hashAlg) and encode it into the
+/// op-state blob (see `params::encode_oaep_blob`). Called from C_EncryptInit /
+/// C_DecryptInit so malformed parameters fail early.
+fn oaep_blob_from_mechanism(
+    p_mechanism: CK_MECHANISM_PTR,
+    raw_param: &[u8],
+) -> Result<Vec<u8>, CK_RV> {
+    use crate::crypto::sign::OaepHash;
+    if raw_param.is_empty() {
+        // No parameter supplied — default to SHA-256 / MGF1-SHA256 / empty label
+        // (backward compatible; SHA-256 is the safe modern default).
+        return Ok(params::encode_oaep_blob(CKM_SHA256, CKG_MGF1_SHA256, &[]));
+    }
+    if params::is_oaep_params_size(raw_param.len()) {
+        // SAFETY: p_mechanism non-null (checked by the caller); the parameter is
+        // a live CK_RSA_PKCS_OAEP_PARAMS of the declared length.
+        let p = unsafe { params::parse_oaep_params(p_mechanism) }?;
+        // Validate hash (SHA-2 only) and MGF.
+        oaep_hash_from_ckm(p.hash_alg)?;
+        oaep_mgf_from_ckg(p.mgf)?;
+        // A non-empty label requires CKZ_DATA_SPECIFIED and valid UTF-8 (rsa 0.9
+        // stores the label as a String).
+        if !p.label.is_empty() {
+            if p.source != CKZ_DATA_SPECIFIED {
+                return Err(CKR_MECHANISM_PARAM_INVALID);
+            }
+            if std::str::from_utf8(&p.label).is_err() {
+                return Err(CKR_MECHANISM_PARAM_INVALID);
+            }
+        }
+        Ok(params::encode_oaep_blob(p.hash_alg, p.mgf, &p.label))
     } else {
-        Err(CKR_MECHANISM_PARAM_INVALID)
+        // Legacy bare-hashAlg parameter: MGF1 with the same hash, empty label.
+        let (hash_ckm, mgf_ckg) = match parse_oaep_hash_legacy(raw_param)? {
+            OaepHash::Sha256 => (CKM_SHA256, CKG_MGF1_SHA256),
+            OaepHash::Sha384 => (CKM_SHA384, CKG_MGF1_SHA384),
+            OaepHash::Sha512 => (CKM_SHA512, CKG_MGF1_SHA512),
+        };
+        Ok(params::encode_oaep_blob(hash_ckm, mgf_ckg, &[]))
     }
 }
 
@@ -254,6 +315,8 @@ pub extern "C" fn C_Initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
 
         // Reset per-key GCM encryption counters so re-initialization starts fresh
         crate::crypto::encrypt::reset_gcm_counters();
+        // Reset the caller-supplied-IV reuse tracker (params-mode AES-GCM).
+        crate::crypto::encrypt::reset_gcm_caller_iv_tracker();
 
         // Reset POST failure flag so re-initialization after C_Finalize gets a fresh chance.
         // If POST fails again below, POST_FAILED will be set back to true.
@@ -720,20 +783,33 @@ pub extern "C" fn C_GetMechanismInfo(
                 flags: CKF_ENCRYPT_FLAG | CKF_DECRYPT_FLAG,
             },
             CKM_EC_KEY_PAIR_GEN => CK_MECHANISM_INFO {
+                // P-256, P-384, P-521, secp256k1 — curve chosen by CKA_EC_PARAMS
                 min_key_size: 256 as CK_ULONG,
-                max_key_size: 384 as CK_ULONG,
+                max_key_size: 521 as CK_ULONG,
                 flags: CKF_GENERATE_KEY_PAIR_FLAG,
+            },
+            CKM_EC_MONTGOMERY_KEY_PAIR_GEN => CK_MECHANISM_INFO {
+                // X25519 (Curve25519) — key agreement only
+                min_key_size: 255 as CK_ULONG,
+                max_key_size: 255 as CK_ULONG,
+                flags: CKF_GENERATE_KEY_PAIR_FLAG | CKF_DERIVE_FLAG,
             },
             CKM_ECDSA | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512 => {
                 CK_MECHANISM_INFO {
                     min_key_size: 256 as CK_ULONG,
-                    max_key_size: 384 as CK_ULONG,
+                    max_key_size: 521 as CK_ULONG,
                     flags: CKF_SIGN_FLAG | CKF_VERIFY_FLAG,
                 }
             }
             CKM_ECDH1_DERIVE | CKM_ECDH1_COFACTOR_DERIVE => CK_MECHANISM_INFO {
-                min_key_size: 256 as CK_ULONG,
-                max_key_size: 384 as CK_ULONG,
+                min_key_size: 255 as CK_ULONG,
+                max_key_size: 521 as CK_ULONG,
+                flags: CKF_DERIVE_FLAG,
+            },
+            CKM_HKDF_DERIVE => CK_MECHANISM_INFO {
+                // HKDF input keying-material (base key) size range, in bytes.
+                min_key_size: 1 as CK_ULONG,
+                max_key_size: 512 as CK_ULONG,
                 flags: CKF_DERIVE_FLAG,
             },
             CKM_EDDSA => CK_MECHANISM_INFO {
@@ -1571,12 +1647,10 @@ pub extern "C" fn C_EncryptInit(
             }
         }
 
-        let mech_param = extract_mechanism_param(p_mechanism);
+        let mut mech_param = extract_mechanism_param(p_mechanism);
 
         // Early validation: reject all-zero IV/nonce for CBC and CTR modes.
         // An all-zero IV indicates an initialization error or IV reuse risk.
-        // Note: AES-GCM nonces are generated internally by the backend (not
-        // caller-supplied), so no zero-check is needed for GCM.
         match mechanism {
             CKM_AES_CBC | CKM_AES_CBC_PAD => {
                 if mech_param.len() == 16 && mech_param.iter().all(|&b| b == 0) {
@@ -1588,6 +1662,54 @@ pub extern "C" fn C_EncryptInit(
                 if mech_param.len() >= 16 && mech_param[..16].iter().all(|&b| b == 0) {
                     tracing::error!("C_EncryptInit: all-zero IV rejected for AES-CTR");
                     return CKR_MECHANISM_PARAM_INVALID;
+                }
+            }
+            CKM_AES_GCM => {
+                // A parameter whose length matches CK_GCM_PARAMS triggers the
+                // conformant path (caller IV/AAD/tag). Any other parameter —
+                // empty, a bare IV, or an unrecognized blob — falls back to
+                // legacy internal-nonce mode, exactly as the pre-3.0 code did
+                // (which ignored the parameter entirely). This preserves 100%
+                // backward compatibility. The parsed params are re-encoded
+                // into a self-describing blob carried in `mechanism_param`;
+                // C_Encrypt decodes it (see params.rs).
+                if params::is_gcm_params_size(mech_param.len()) {
+                    // SAFETY: p_mechanism non-null (checked above); caller
+                    // provides a valid CK_GCM_PARAMS with live p_iv/p_aad.
+                    let parsed = match unsafe { params::parse_gcm_params(p_mechanism) } {
+                        Ok(p) => p,
+                        Err(rv) => return rv,
+                    };
+                    // Best-effort caller-IV reuse detection: a repeated
+                    // (key, IV) pair is catastrophic for GCM.
+                    {
+                        let obj_read = obj.read();
+                        if let Some(ref km) = obj_read.key_material {
+                            if !crate::crypto::encrypt::gcm_caller_iv_is_fresh(
+                                km.as_bytes(),
+                                &parsed.iv,
+                            ) {
+                                tracing::error!(
+                                    "C_EncryptInit: AES-GCM IV reuse detected for this key"
+                                );
+                                return CKR_MECHANISM_PARAM_INVALID;
+                            }
+                        }
+                    }
+                    mech_param = params::encode_gcm_blob(&parsed);
+                } else {
+                    // Legacy mode: clear any bare-IV blob so C_Encrypt
+                    // unambiguously selects the internal-nonce path.
+                    mech_param.clear();
+                }
+            }
+            CKM_RSA_PKCS_OAEP => {
+                // Parse + validate CK_RSA_PKCS_OAEP_PARAMS (hash/MGF/label) now,
+                // re-encoding into a self-describing blob carried in
+                // mechanism_param; C_Encrypt decodes it (see params.rs).
+                match oaep_blob_from_mechanism(p_mechanism, &mech_param) {
+                    Ok(blob) => mech_param = blob,
+                    Err(rv) => return rv,
                 }
             }
             _ => {}
@@ -1682,8 +1804,16 @@ pub extern "C" fn C_Encrypt(
         let key_bytes = match &obj.key_material {
             Some(km) => km.as_bytes(),
             None => {
-                sess.active_operation = None;
-                return CKR_KEY_HANDLE_INVALID;
+                // RSA public-key encryption (OAEP) uses the object's modulus /
+                // public exponent, not symmetric key material — so a public key
+                // with no `key_material` is valid here. Symmetric mechanisms
+                // still require it.
+                if mechanism == CKM_RSA_PKCS_OAEP {
+                    &[]
+                } else {
+                    sess.active_operation = None;
+                    return CKR_KEY_HANDLE_INVALID;
+                }
             }
         };
 
@@ -1693,8 +1823,13 @@ pub extern "C" fn C_Encrypt(
         if p_encrypted_data.is_null() {
             let estimated = match mechanism {
                 CKM_AES_GCM => {
-                    // GCM output = nonce (12) + ciphertext (= plaintext len) + tag (16)
-                    data.len() + 12 + 16
+                    if let Some(p) = params::decode_gcm_blob(&mech_param) {
+                        // params mode: ciphertext (= plaintext len) + tag
+                        data.len() + (p.tag_bits / 8) as usize
+                    } else {
+                        // legacy mode: nonce (12) + ciphertext + tag (16)
+                        data.len() + 12 + 16
+                    }
                 }
                 CKM_AES_CBC | CKM_AES_CBC_PAD => {
                     // CBC-PAD may add up to one block; plain CBC output = input len
@@ -1723,7 +1858,17 @@ pub extern "C" fn C_Encrypt(
         }
 
         let result = match mechanism {
-            CKM_AES_GCM => hsm.crypto_backend.aes_256_gcm_encrypt(key_bytes, data),
+            CKM_AES_GCM => {
+                if let Some(p) = params::decode_gcm_blob(&mech_param) {
+                    // Conformant path: caller-supplied IV/AAD/tag.
+                    crate::crypto::encrypt::aes_gcm_encrypt(
+                        key_bytes, &p.iv, &p.aad, data, p.tag_bits,
+                    )
+                } else {
+                    // Legacy path: internally generated nonce, prepended.
+                    hsm.crypto_backend.aes_256_gcm_encrypt(key_bytes, data)
+                }
+            }
             CKM_AES_CBC | CKM_AES_CBC_PAD => {
                 if mech_param.is_empty() {
                     Err(HsmError::MechanismParamInvalid)
@@ -1755,7 +1900,21 @@ pub extern "C" fn C_Encrypt(
                         return CKR_KEY_HANDLE_INVALID;
                     }
                 };
-                let oaep_hash = match parse_oaep_hash(&mech_param) {
+                let (hash_ckm, mgf_ckg, label) = match params::decode_oaep_blob(&mech_param) {
+                    Some(t) => t,
+                    None => {
+                        sess.active_operation = None;
+                        return CKR_MECHANISM_PARAM_INVALID;
+                    }
+                };
+                let hash = match oaep_hash_from_ckm(hash_ckm) {
+                    Ok(h) => h,
+                    Err(rv) => {
+                        sess.active_operation = None;
+                        return rv;
+                    }
+                };
+                let mgf = match oaep_mgf_from_ckg(mgf_ckg) {
                     Ok(h) => h,
                     Err(rv) => {
                         sess.active_operation = None;
@@ -1763,7 +1922,7 @@ pub extern "C" fn C_Encrypt(
                     }
                 };
                 hsm.crypto_backend
-                    .rsa_oaep_encrypt(modulus, pub_exp, data, oaep_hash)
+                    .rsa_oaep_encrypt(modulus, pub_exp, data, hash, mgf, &label)
             }
             _ => {
                 sess.active_operation = None;
@@ -1880,7 +2039,29 @@ pub extern "C" fn C_DecryptInit(
             }
         }
 
-        let mech_param = extract_mechanism_param(p_mechanism);
+        let mut mech_param = extract_mechanism_param(p_mechanism);
+        // AES-GCM: a CK_GCM_PARAMS-sized parameter is parsed and re-encoded
+        // into the internal blob (see C_EncryptInit). Any other parameter →
+        // legacy prepended-nonce mode. No IV-reuse check on decrypt (reuse
+        // only harms confidentiality on the encrypt side).
+        if mechanism == CKM_AES_GCM {
+            if params::is_gcm_params_size(mech_param.len()) {
+                let parsed = match unsafe { params::parse_gcm_params(p_mechanism) } {
+                    Ok(p) => p,
+                    Err(rv) => return rv,
+                };
+                mech_param = params::encode_gcm_blob(&parsed);
+            } else {
+                mech_param.clear();
+            }
+        } else if mechanism == CKM_RSA_PKCS_OAEP {
+            // Parse + validate CK_RSA_PKCS_OAEP_PARAMS and carry it as a blob
+            // (see C_EncryptInit / params.rs).
+            match oaep_blob_from_mechanism(p_mechanism, &mech_param) {
+                Ok(blob) => mech_param = blob,
+                Err(rv) => return rv,
+            }
+        }
         sess.active_operation = Some(ActiveOperation::Decrypt {
             mechanism,
             key_handle: key,
@@ -1959,8 +2140,13 @@ pub extern "C" fn C_Decrypt(
         if p_data.is_null() {
             let estimated = match mechanism {
                 CKM_AES_GCM => {
-                    // GCM plaintext = ciphertext - nonce (12) - tag (16)
-                    data.len().saturating_sub(28)
+                    if let Some(p) = params::decode_gcm_blob(&mech_param) {
+                        // params mode: plaintext = ciphertext - tag
+                        data.len().saturating_sub((p.tag_bits / 8) as usize)
+                    } else {
+                        // legacy mode: ciphertext - nonce (12) - tag (16)
+                        data.len().saturating_sub(28)
+                    }
                 }
                 CKM_AES_CBC | CKM_AES_CBC_PAD => data.len(),
                 CKM_AES_CTR => data.len(),
@@ -1980,7 +2166,15 @@ pub extern "C" fn C_Decrypt(
         }
 
         let result = match mechanism {
-            CKM_AES_GCM => hsm.crypto_backend.aes_256_gcm_decrypt(key_bytes, data),
+            CKM_AES_GCM => {
+                if let Some(p) = params::decode_gcm_blob(&mech_param) {
+                    crate::crypto::encrypt::aes_gcm_decrypt(
+                        key_bytes, &p.iv, &p.aad, data, p.tag_bits,
+                    )
+                } else {
+                    hsm.crypto_backend.aes_256_gcm_decrypt(key_bytes, data)
+                }
+            }
             CKM_AES_CBC | CKM_AES_CBC_PAD => {
                 if mech_param.is_empty() {
                     Err(HsmError::MechanismParamInvalid)
@@ -1998,7 +2192,21 @@ pub extern "C" fn C_Decrypt(
                 }
             }
             CKM_RSA_PKCS_OAEP => {
-                let oaep_hash = match parse_oaep_hash(&mech_param) {
+                let (hash_ckm, mgf_ckg, label) = match params::decode_oaep_blob(&mech_param) {
+                    Some(t) => t,
+                    None => {
+                        sess.active_operation = None;
+                        return CKR_MECHANISM_PARAM_INVALID;
+                    }
+                };
+                let hash = match oaep_hash_from_ckm(hash_ckm) {
+                    Ok(h) => h,
+                    Err(rv) => {
+                        sess.active_operation = None;
+                        return rv;
+                    }
+                };
+                let mgf = match oaep_mgf_from_ckg(mgf_ckg) {
                     Ok(h) => h,
                     Err(rv) => {
                         sess.active_operation = None;
@@ -2006,7 +2214,7 @@ pub extern "C" fn C_Decrypt(
                     }
                 };
                 hsm.crypto_backend
-                    .rsa_oaep_decrypt(key_bytes, data, oaep_hash)
+                    .rsa_oaep_decrypt(key_bytes, data, hash, mgf, &label)
             }
             _ => {
                 sess.active_operation = None;
@@ -2116,6 +2324,14 @@ pub extern "C" fn C_SignInit(
             mechanisms::validate_mechanism_for_policy(mechanism, &hsm.algorithm_config, true)
         {
             return rv;
+        }
+
+        // RSA-PSS: validate CK_RSA_PKCS_PSS_PARAMS if the caller supplied them.
+        if sign::is_pss_mechanism(mechanism) {
+            let raw = extract_mechanism_param(p_mechanism);
+            if let Err(rv) = validate_pss_params(mechanism, &raw) {
+                return rv;
+            }
         }
 
         let obj = match hsm.object_store.get_object(key) {
@@ -2287,11 +2503,111 @@ pub extern "C" fn C_Sign(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// Map an HMAC mechanism to the `mac::HmacHash` selector.
+fn hmac_hash_of(mechanism: CK_MECHANISM_TYPE) -> Option<crate::crypto::mac::HmacHash> {
+    use crate::crypto::mac::HmacHash;
+    match mechanism {
+        CKM_SHA224_HMAC => Some(HmacHash::Sha224),
+        CKM_SHA256_HMAC => Some(HmacHash::Sha256),
+        CKM_SHA384_HMAC => Some(HmacHash::Sha384),
+        CKM_SHA512_HMAC => Some(HmacHash::Sha512),
+        _ => None,
+    }
+}
+
 /// Helper to check if EC params correspond to P-384
 fn is_p384_params(ec_params: &[u8]) -> bool {
     // OID for secp384r1: 1.3.132.0.34 = 06 05 2B 81 04 00 22
     const P384_OID: &[u8] = &[0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x22];
     ec_params == P384_OID || ec_params.windows(P384_OID.len()).any(|w| w == P384_OID)
+}
+
+/// Dispatch a prehashed ECDSA **sign** to the correct curve implementation.
+/// P-256/P-384 use the pluggable [`CryptoBackend`]; P-521 and secp256k1 use the
+/// `ec_extended` free functions (not part of the backend trait). The curve is
+/// taken from the stored key's `CKA_EC_PARAMS`.
+fn ecdsa_sign_prehashed_dispatch(
+    backend: &dyn CryptoBackend,
+    ec_params: &[u8],
+    key_bytes: &[u8],
+    digest: &[u8],
+) -> HsmResult<Vec<u8>> {
+    use crate::crypto::ec_extended::{self, ExtendedCurve};
+    match ec_extended::curve_from_ec_params(ec_params) {
+        Some(ExtendedCurve::P521) => ec_extended::p521_sign_prehashed(key_bytes, digest),
+        Some(ExtendedCurve::Secp256k1) => ec_extended::secp256k1_sign_prehashed(key_bytes, digest),
+        // X25519 is a key-agreement curve; it cannot produce ECDSA signatures.
+        Some(ExtendedCurve::X25519) => Err(HsmError::KeyTypeInconsistent),
+        None if is_p384_params(ec_params) => backend.ecdsa_p384_sign_prehashed(key_bytes, digest),
+        None => backend.ecdsa_p256_sign_prehashed(key_bytes, digest),
+    }
+}
+
+/// Dispatch a prehashed ECDSA **verify** to the correct curve implementation
+/// (see [`ecdsa_sign_prehashed_dispatch`]).
+fn ecdsa_verify_prehashed_dispatch(
+    backend: &dyn CryptoBackend,
+    ec_params: &[u8],
+    ec_point: &[u8],
+    digest: &[u8],
+    signature: &[u8],
+) -> HsmResult<bool> {
+    use crate::crypto::ec_extended::{self, ExtendedCurve};
+    match ec_extended::curve_from_ec_params(ec_params) {
+        Some(ExtendedCurve::P521) => {
+            ec_extended::p521_verify_prehashed(ec_point, digest, signature)
+        }
+        Some(ExtendedCurve::Secp256k1) => {
+            ec_extended::secp256k1_verify_prehashed(ec_point, digest, signature)
+        }
+        Some(ExtendedCurve::X25519) => Err(HsmError::KeyTypeInconsistent),
+        None if is_p384_params(ec_params) => {
+            backend.ecdsa_p384_verify_prehashed(ec_point, digest, signature)
+        }
+        None => backend.ecdsa_p256_verify_prehashed(ec_point, digest, signature),
+    }
+}
+
+/// Validate `CK_RSA_PKCS_PSS_PARAMS` (when supplied) against the PSS mechanism.
+///
+/// A null/empty parameter is accepted and uses the FIPS 186-5 default salt
+/// length (= hash length) — the value the signer already produces. When
+/// parameters ARE supplied, the hash and MGF1 must match the mechanism's hash,
+/// and only the default salt length is supported; any inconsistency yields
+/// `CKR_MECHANISM_PARAM_INVALID` rather than a silently mis-parameterised
+/// signature. (Honoring non-default salt lengths and the generic
+/// `CKM_RSA_PKCS_PSS` needs the hash/salt threaded through the sign op-state —
+/// tracked as a follow-up.)
+fn validate_pss_params(mechanism: CK_MECHANISM_TYPE, raw_param: &[u8]) -> Result<(), CK_RV> {
+    use crate::crypto::sign::HashAlg;
+    if raw_param.is_empty() {
+        return Ok(());
+    }
+    let p = params::parse_pss_params(raw_param).ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+    let hash = sign::pss_mechanism_to_hash(mechanism).map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+    let (want_hash, want_mgf, hash_len) = match hash {
+        HashAlg::Sha256 => (CKM_SHA256, CKG_MGF1_SHA256, 32usize),
+        HashAlg::Sha384 => (CKM_SHA384, CKG_MGF1_SHA384, 48),
+        HashAlg::Sha512 => (CKM_SHA512, CKG_MGF1_SHA512, 64),
+    };
+    if p.hash_alg != want_hash || p.mgf != want_mgf {
+        tracing::error!(
+            "RSA-PSS params (hash {:#x}, mgf {:#x}) inconsistent with mechanism {:#x}",
+            p.hash_alg,
+            p.mgf,
+            mechanism
+        );
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    if p.s_len as usize != hash_len {
+        tracing::error!(
+            "RSA-PSS salt length {} != hash length {} unsupported (FIPS 186-5 default only)",
+            p.s_len,
+            hash_len
+        );
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    Ok(())
 }
 
 /// Single-shot sign: hash + sign in one step (used by C_Sign and C_SignFinal for non-hashed mechanisms)
@@ -2309,17 +2625,26 @@ fn sign_single_shot(
         let key_type = obj.key_type.unwrap_or(0);
         match key_type {
             CKK_EC => {
+                // PKCS#11 ECDSA semantics: for raw CKM_ECDSA the caller's
+                // `data` IS the digest; for combined CKM_ECDSA_SHAxxx we hash
+                // `data` with the mechanism's NAMED digest (which may differ
+                // from the curve default — e.g. SHA-512 on a P-256 key). Both
+                // then sign via the prehash path (no internal re-hashing).
+                let digest: Vec<u8> = match sign::sign_mechanism_to_digest_mechanism(mechanism) {
+                    Some(digest_mech) => crate::crypto::digest::compute_digest(digest_mech, data)?,
+                    None => data.to_vec(), // raw CKM_ECDSA
+                };
                 let ec_params = obj.ec_params.as_deref().unwrap_or(&[]);
-                if is_p384_params(ec_params) {
-                    backend.ecdsa_p384_sign(key_bytes, data)
-                } else {
-                    backend.ecdsa_p256_sign(key_bytes, data)
-                }
+                ecdsa_sign_prehashed_dispatch(backend, ec_params, key_bytes, &digest)
             }
             _ => Err(HsmError::KeyTypeInconsistent),
         }
     } else if sign::is_eddsa_mechanism(mechanism) {
         backend.ed25519_sign(key_bytes, data)
+    } else if let Some(hash) = hmac_hash_of(mechanism) {
+        // HMAC: the "signature" is the MAC over the full message. The key is a
+        // secret key (CKK_GENERIC_SECRET / CKK_*_HMAC / CKK_AES).
+        crate::crypto::mac::hmac_sign(hash, key_bytes, data)
     } else if pqc::is_ml_dsa_mechanism(mechanism) {
         let variant =
             pqc::mechanism_to_ml_dsa_variant(mechanism).ok_or(HsmError::MechanismInvalid)?;
@@ -2370,11 +2695,7 @@ fn sign_prehashed(
         match key_type {
             CKK_EC => {
                 let ec_params = obj.ec_params.as_deref().unwrap_or(&[]);
-                if is_p384_params(ec_params) {
-                    backend.ecdsa_p384_sign_prehashed(key_bytes, digest)
-                } else {
-                    backend.ecdsa_p256_sign_prehashed(key_bytes, digest)
-                }
+                ecdsa_sign_prehashed_dispatch(backend, ec_params, key_bytes, digest)
             }
             _ => Err(HsmError::KeyTypeInconsistent),
         }
@@ -2403,12 +2724,14 @@ fn verify_single_shot(
         backend.rsa_pss_verify(modulus, pub_exp, data, signature, hash)
     } else if sign::is_ecdsa_mechanism(mechanism) {
         let ec_point = obj.ec_point.as_deref().ok_or(HsmError::KeyHandleInvalid)?;
+        // Mirror sign_single_shot: raw CKM_ECDSA verifies over the caller's
+        // digest; combined mechanisms hash with the mechanism's named digest.
+        let digest: Vec<u8> = match sign::sign_mechanism_to_digest_mechanism(mechanism) {
+            Some(digest_mech) => crate::crypto::digest::compute_digest(digest_mech, data)?,
+            None => data.to_vec(), // raw CKM_ECDSA
+        };
         let ec_params = obj.ec_params.as_deref().unwrap_or(&[]);
-        if is_p384_params(ec_params) {
-            backend.ecdsa_p384_verify(ec_point, data, signature)
-        } else {
-            backend.ecdsa_p256_verify(ec_point, data, signature)
-        }
+        ecdsa_verify_prehashed_dispatch(backend, ec_params, ec_point, &digest, signature)
     } else if sign::is_eddsa_mechanism(mechanism) {
         let pub_key = obj
             .public_key_data
@@ -2416,6 +2739,15 @@ fn verify_single_shot(
             .or(obj.ec_point.as_deref())
             .ok_or(HsmError::KeyHandleInvalid)?;
         backend.ed25519_verify(pub_key, data, signature)
+    } else if let Some(hash) = hmac_hash_of(mechanism) {
+        // HMAC verify: recompute the MAC over `data` and constant-time compare
+        // against the supplied tag. The key is the object's secret material.
+        let key_bytes = obj
+            .key_material
+            .as_ref()
+            .map(|km| km.as_bytes())
+            .ok_or(HsmError::KeyHandleInvalid)?;
+        crate::crypto::mac::hmac_verify(hash, key_bytes, data, signature)
     } else if pqc::is_ml_dsa_mechanism(mechanism) {
         let pub_key = obj
             .public_key_data
@@ -2494,11 +2826,7 @@ fn verify_prehashed(
     } else if sign::is_ecdsa_mechanism(mechanism) {
         let ec_point = obj.ec_point.as_deref().ok_or(HsmError::KeyHandleInvalid)?;
         let ec_params = obj.ec_params.as_deref().unwrap_or(&[]);
-        if is_p384_params(ec_params) {
-            backend.ecdsa_p384_verify_prehashed(ec_point, digest, signature)
-        } else {
-            backend.ecdsa_p256_verify_prehashed(ec_point, digest, signature)
-        }
+        ecdsa_verify_prehashed_dispatch(backend, ec_params, ec_point, digest, signature)
     } else {
         // RSA PKCS#1 v1.5 prehashed
         let modulus = obj.modulus.as_deref().ok_or(HsmError::KeyHandleInvalid)?;
@@ -2545,6 +2873,14 @@ pub extern "C" fn C_VerifyInit(
             mechanisms::validate_mechanism_for_policy(mechanism, &hsm.algorithm_config, false)
         {
             return rv;
+        }
+
+        // RSA-PSS: validate CK_RSA_PKCS_PSS_PARAMS if the caller supplied them.
+        if sign::is_pss_mechanism(mechanism) {
+            let raw = extract_mechanism_param(p_mechanism);
+            if let Err(rv) = validate_pss_params(mechanism, &raw) {
+                return rv;
+            }
         }
 
         let obj = match hsm.object_store.get_object(key) {
@@ -2707,7 +3043,7 @@ pub extern "C" fn C_GenerateKey(
         }
 
         let mechanism = unsafe { (*p_mechanism).mechanism };
-        if mechanism != CKM_AES_KEY_GEN {
+        if mechanism != CKM_AES_KEY_GEN && mechanism != CKM_GENERIC_SECRET_KEY_GEN {
             return CKR_MECHANISM_INVALID;
         }
         // FIPS algorithm policy check
@@ -2741,12 +3077,22 @@ pub extern "C" fn C_GenerateKey(
             })
             .unwrap_or(32);
 
-        let key_material = match hsm
-            .crypto_backend
-            .generate_aes_key(key_len, hsm.algorithm_config.fips_approved_only)
-        {
-            Ok(k) => k,
-            Err(e) => return err_to_rv(e),
+        // Generate the key material and set class-default permissions per
+        // mechanism: AES → encrypt/decrypt; generic secret → sign/verify
+        // (its primary use is as an HMAC or KDF base key).
+        let (key_material, key_type) = if mechanism == CKM_GENERIC_SECRET_KEY_GEN {
+            match crate::crypto::keygen::generate_generic_secret(key_len) {
+                Ok(k) => (k, CKK_GENERIC_SECRET),
+                Err(e) => return err_to_rv(e),
+            }
+        } else {
+            match hsm
+                .crypto_backend
+                .generate_aes_key(key_len, hsm.algorithm_config.fips_approved_only)
+            {
+                Ok(k) => (k, CKK_AES),
+                Err(e) => return err_to_rv(e),
+            }
         };
 
         let handle = match hsm.object_store.next_handle() {
@@ -2754,11 +3100,17 @@ pub extern "C" fn C_GenerateKey(
             Err(e) => return err_to_rv(e),
         };
         let mut obj = StoredObject::new(handle, CKO_SECRET_KEY);
-        obj.key_type = Some(CKK_AES);
+        obj.key_type = Some(key_type);
         obj.key_material = Some(key_material);
         obj.value_len = Some(key_len as CK_ULONG);
-        obj.can_encrypt = true;
-        obj.can_decrypt = true;
+        if key_type == CKK_GENERIC_SECRET {
+            obj.can_sign = true;
+            obj.can_verify = true;
+            obj.can_derive = true;
+        } else {
+            obj.can_encrypt = true;
+            obj.can_decrypt = true;
+        }
         obj.sensitive = true;
         obj.extractable = false;
         obj.private = true;
@@ -2812,6 +3164,24 @@ pub extern "C" fn C_GenerateKey(
                 }
                 CKA_UNWRAP => {
                     obj.can_unwrap = match parse_ck_bbool(value) {
+                        Ok(v) => v,
+                        Err(rv) => return rv,
+                    }
+                }
+                CKA_SIGN => {
+                    obj.can_sign = match parse_ck_bbool(value) {
+                        Ok(v) => v,
+                        Err(rv) => return rv,
+                    }
+                }
+                CKA_VERIFY => {
+                    obj.can_verify = match parse_ck_bbool(value) {
+                        Ok(v) => v,
+                        Err(rv) => return rv,
+                    }
+                }
+                CKA_DERIVE => {
+                    obj.can_derive = match parse_ck_bbool(value) {
                         Ok(v) => v,
                         Err(rv) => return rv,
                     }
@@ -2926,6 +3296,9 @@ pub extern "C" fn C_GenerateKeyPair(
         let result = match mechanism {
             CKM_RSA_PKCS_KEY_PAIR_GEN => generate_rsa_keypair(&hsm, &pub_template, &priv_template),
             CKM_EC_KEY_PAIR_GEN => generate_ec_keypair(&hsm, &pub_template, &priv_template),
+            CKM_EC_MONTGOMERY_KEY_PAIR_GEN => {
+                generate_x25519_keypair(&hsm, &pub_template, &priv_template)
+            }
             CKM_EDDSA => generate_ed25519_keypair(&hsm, &pub_template, &priv_template),
             m if pqc::is_ml_kem_mechanism(m)
                 || pqc::is_ml_dsa_mechanism(m)
@@ -3044,12 +3417,40 @@ fn generate_rsa_keypair(
     Ok((pub_handle, priv_handle, modulus_bits))
 }
 
-/// EC key pair generation helper (P-256 / P-384)
+/// Fixed 64-byte prehash for extended-curve EC keygen pairwise self-tests.
+/// The value is arbitrary (P-521 requires ≥ 33 bytes); the test only checks
+/// that a freshly generated key can sign and then verify its own signature.
+const EC_PAIRWISE_DIGEST: [u8; 64] = [0x5a; 64];
+
+/// Pairwise consistency self-test for a freshly generated extended-curve EC key
+/// (FIPS 140-3 §9.6). `sign_result` is the signature over [`EC_PAIRWISE_DIGEST`];
+/// `verify` re-checks it. On failure, latches the POST error state so no further
+/// cryptographic service is offered, and returns `CKR_GENERAL_ERROR`.
+fn ec_keygen_pairwise_selftest(
+    sign_result: HsmResult<Vec<u8>>,
+    verify: impl FnOnce(&[u8]) -> HsmResult<bool>,
+    label: &str,
+) -> Result<(), CK_RV> {
+    let ok = sign_result.and_then(|sig| verify(&sig)).unwrap_or(false);
+    if !ok {
+        tracing::error!("{label} pairwise consistency test failed — entering error state");
+        POST_FAILED.store(true, Ordering::Release);
+        return Err(CKR_GENERAL_ERROR);
+    }
+    Ok(())
+}
+
+/// EC key pair generation helper for Weierstrass curves: P-256, P-384, P-521,
+/// and secp256k1. The curve is selected from `CKA_EC_PARAMS`. secp256k1 is not
+/// FIPS-approved and is rejected under `fips_approved_only`. X25519 Montgomery
+/// keys are generated by [`generate_x25519_keypair`] instead.
 fn generate_ec_keypair(
     hsm: &HsmCore,
     pub_template: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)],
     priv_template: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)],
 ) -> Result<(CK_OBJECT_HANDLE, CK_OBJECT_HANDLE, u32), CK_RV> {
+    use crate::crypto::ec_extended::{self, ExtendedCurve};
+
     // Determine curve from CKA_EC_PARAMS in the public template
     let ec_params = pub_template
         .iter()
@@ -3057,40 +3458,67 @@ fn generate_ec_keypair(
         .map(|(_, v)| v.clone())
         .unwrap_or_default();
 
-    let is_p384 = is_p384_params(&ec_params);
-    let (private_key, public_key, key_bits) = if is_p384 {
-        let (priv_key, pub_key) = hsm
-            .crypto_backend
-            .generate_ec_p384_key_pair()
-            .map_err(err_to_rv)?;
-        (priv_key, pub_key, 384u32)
-    } else {
-        let (priv_key, pub_key) = hsm
-            .crypto_backend
-            .generate_ec_p256_key_pair()
-            .map_err(err_to_rv)?;
-        (priv_key, pub_key, 256u32)
-    };
-
-    // FIPS 140-3 §9.6: Pairwise consistency test
-    let pairwise_result = if is_p384 {
-        pairwise_test::ecdsa_p384_pairwise_test(
-            hsm.crypto_backend.as_ref(),
-            &private_key,
-            &public_key,
+    // secp256k1 and X25519 are not FIPS-approved curves.
+    let extended = ec_extended::curve_from_ec_params(&ec_params);
+    if hsm.algorithm_config.fips_approved_only
+        && matches!(
+            extended,
+            Some(ExtendedCurve::Secp256k1) | Some(ExtendedCurve::X25519)
         )
-    } else {
-        pairwise_test::ecdsa_p256_pairwise_test(
-            hsm.crypto_backend.as_ref(),
-            &private_key,
-            &public_key,
-        )
-    };
-    if pairwise_result.is_err() {
-        tracing::error!("ECDSA pairwise consistency test failed — entering error state");
-        POST_FAILED.store(true, Ordering::Release);
-        return Err(CKR_GENERAL_ERROR);
+    {
+        return Err(CKR_CURVE_NOT_SUPPORTED);
     }
+
+    let (private_key, public_key, key_bits) = match extended {
+        Some(ExtendedCurve::P521) => {
+            let (sk, pk) = ec_extended::p521_keygen().map_err(err_to_rv)?;
+            ec_keygen_pairwise_selftest(
+                ec_extended::p521_sign_prehashed(&sk, &EC_PAIRWISE_DIGEST),
+                |sig| ec_extended::p521_verify_prehashed(&pk, &EC_PAIRWISE_DIGEST, sig),
+                "P-521",
+            )?;
+            (RawKeyMaterial::new(sk), pk, 521u32)
+        }
+        Some(ExtendedCurve::Secp256k1) => {
+            let (sk, pk) = ec_extended::secp256k1_keygen().map_err(err_to_rv)?;
+            ec_keygen_pairwise_selftest(
+                ec_extended::secp256k1_sign_prehashed(&sk, &EC_PAIRWISE_DIGEST),
+                |sig| ec_extended::secp256k1_verify_prehashed(&pk, &EC_PAIRWISE_DIGEST, sig),
+                "secp256k1",
+            )?;
+            (RawKeyMaterial::new(sk), pk, 256u32)
+        }
+        Some(ExtendedCurve::X25519) => {
+            // Montgomery keys cannot be generated with CKM_EC_KEY_PAIR_GEN.
+            return Err(CKR_CURVE_NOT_SUPPORTED);
+        }
+        None => {
+            // Legacy P-256 / P-384 path (curve chosen by is_p384_params;
+            // anything unrecognised falls through to P-256, as before).
+            let is_p384 = is_p384_params(&ec_params);
+            let (sk, pk) = if is_p384 {
+                hsm.crypto_backend
+                    .generate_ec_p384_key_pair()
+                    .map_err(err_to_rv)?
+            } else {
+                hsm.crypto_backend
+                    .generate_ec_p256_key_pair()
+                    .map_err(err_to_rv)?
+            };
+            // FIPS 140-3 §9.6: Pairwise consistency test
+            let pairwise_result = if is_p384 {
+                pairwise_test::ecdsa_p384_pairwise_test(hsm.crypto_backend.as_ref(), &sk, &pk)
+            } else {
+                pairwise_test::ecdsa_p256_pairwise_test(hsm.crypto_backend.as_ref(), &sk, &pk)
+            };
+            if pairwise_result.is_err() {
+                tracing::error!("ECDSA pairwise consistency test failed — entering error state");
+                POST_FAILED.store(true, Ordering::Release);
+                return Err(CKR_GENERAL_ERROR);
+            }
+            (sk, pk, if is_p384 { 384u32 } else { 256u32 })
+        }
+    };
 
     let pub_handle = hsm.object_store.next_handle().map_err(err_to_rv)?;
     let mut pub_obj = StoredObject::new(pub_handle, CKO_PUBLIC_KEY);
@@ -3128,6 +3556,76 @@ fn generate_ec_keypair(
         .insert_object(priv_obj)
         .map_err(|e| err_to_rv(e))?;
     Ok((pub_handle, priv_handle, key_bits))
+}
+
+/// X25519 (Montgomery) key pair generation — `CKM_EC_MONTGOMERY_KEY_PAIR_GEN`.
+///
+/// Produces a derive-only key pair (ECDH via `C_DeriveKey`); it cannot sign or
+/// verify. X25519 is not FIPS-approved, so this is rejected under
+/// `fips_approved_only`. The stored `CKA_EC_PARAMS` carries the X25519 OID so
+/// `C_DeriveKey` can identify the curve later.
+fn generate_x25519_keypair(
+    hsm: &HsmCore,
+    pub_template: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)],
+    priv_template: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)],
+) -> Result<(CK_OBJECT_HANDLE, CK_OBJECT_HANDLE, u32), CK_RV> {
+    use crate::crypto::ec_extended::{self, ExtendedCurve};
+
+    if hsm.algorithm_config.fips_approved_only {
+        return Err(CKR_CURVE_NOT_SUPPORTED);
+    }
+
+    // If the caller supplied CKA_EC_PARAMS it must name X25519 (X448 is not
+    // supported); otherwise default to the X25519 OID.
+    let ec_params = match pub_template.iter().find(|(t, _)| *t == CKA_EC_PARAMS) {
+        Some((_, v)) => {
+            if ec_extended::curve_from_ec_params(v) != Some(ExtendedCurve::X25519) {
+                return Err(CKR_CURVE_NOT_SUPPORTED);
+            }
+            v.clone()
+        }
+        None => ec_extended::x25519_oid().to_vec(),
+    };
+
+    let (private_key, public_key) = ec_extended::x25519_keygen().map_err(err_to_rv)?;
+
+    let pub_handle = hsm.object_store.next_handle().map_err(err_to_rv)?;
+    let mut pub_obj = StoredObject::new(pub_handle, CKO_PUBLIC_KEY);
+    pub_obj.key_type = Some(CKK_EC_MONTGOMERY);
+    pub_obj.ec_params = Some(ec_params.clone());
+    pub_obj.ec_point = Some(public_key.clone());
+    pub_obj.public_key_data = Some(public_key.clone());
+    pub_obj.can_derive = true;
+    pub_obj.private = false;
+    pub_obj.sensitive = false;
+    let rv = apply_pub_template(&mut pub_obj, pub_template);
+    if rv != CKR_OK {
+        return Err(rv);
+    }
+
+    let priv_handle = hsm.object_store.next_handle().map_err(err_to_rv)?;
+    let mut priv_obj = StoredObject::new(priv_handle, CKO_PRIVATE_KEY);
+    priv_obj.key_type = Some(CKK_EC_MONTGOMERY);
+    priv_obj.key_material = Some(RawKeyMaterial::new(private_key));
+    priv_obj.ec_params = Some(ec_params);
+    priv_obj.ec_point = Some(public_key.clone());
+    priv_obj.public_key_data = Some(public_key);
+    priv_obj.can_derive = true;
+    priv_obj.sensitive = true;
+    priv_obj.extractable = false;
+    priv_obj.private = true;
+    let rv = apply_priv_template(&mut priv_obj, priv_template);
+    if rv != CKR_OK {
+        return Err(rv);
+    }
+
+    hsm.object_store
+        .insert_object(pub_obj)
+        .map_err(|e| err_to_rv(e))?;
+    hsm.object_store
+        .insert_object(priv_obj)
+        .map_err(|e| err_to_rv(e))?;
+    Ok((pub_handle, priv_handle, 256))
 }
 
 /// Ed25519 key pair generation helper
@@ -4187,20 +4685,42 @@ fn estimated_signature_len(mechanism: CK_MECHANISM_TYPE, obj: &StoredObject) -> 
         obj.key_material.as_ref().map(|km| km.as_bytes().len())
     } else if sign::is_ecdsa_mechanism(mechanism) {
         let ec_params = obj.ec_params.as_deref().unwrap_or(&[]);
-        if is_p384_params(ec_params) {
-            Some(104) // DER-encoded P-384 ECDSA: up to ~104 bytes
-        } else {
-            Some(72) // DER-encoded P-256 ECDSA: up to ~72 bytes
+        use crate::crypto::ec_extended::{curve_from_ec_params, ExtendedCurve};
+        match curve_from_ec_params(ec_params) {
+            // DER-encoded P-521 ECDSA: SEQUENCE of two 66-byte INTEGERs → up to
+            // ~141 bytes; round up to a safe upper bound.
+            Some(ExtendedCurve::P521) => Some(144),
+            // secp256k1 has a 32-byte field, like P-256.
+            Some(ExtendedCurve::Secp256k1) => Some(72),
+            // X25519 is key-agreement only; never signs.
+            Some(ExtendedCurve::X25519) => None,
+            None if is_p384_params(ec_params) => Some(104), // DER-encoded P-384 ECDSA
+            None => Some(72),                               // DER-encoded P-256 ECDSA
         }
     } else if sign::is_eddsa_mechanism(mechanism) {
         Some(64) // Ed25519
-    } else if pqc::is_ml_dsa_mechanism(mechanism) {
-        // ML-DSA signatures vary by variant; use generous upper bound
-        Some(4672) // ML-DSA-87 max
-    } else if pqc::is_slh_dsa_mechanism(mechanism) {
-        Some(49_856) // SLH-DSA-SHA2-256f max
+    } else if let Some(hash) = hmac_hash_of(mechanism) {
+        Some(crate::crypto::mac::hmac_output_len(hash))
+    } else if let Some(variant) = pqc::mechanism_to_ml_dsa_variant(mechanism) {
+        // Exact FIPS 204 signature sizes per parameter set
+        Some(match variant {
+            pqc::MlDsaVariant::MlDsa44 => 2420,
+            pqc::MlDsaVariant::MlDsa65 => 3309,
+            pqc::MlDsaVariant::MlDsa87 => 4627,
+        })
+    } else if let Some(variant) = pqc::mechanism_to_slh_dsa_variant(mechanism) {
+        // Exact FIPS 205 signature sizes per parameter set (Table 2; the
+        // SHA2 and SHAKE families share sizes at each security level)
+        Some(match variant {
+            pqc::SlhDsaVariant::Sha2_128s | pqc::SlhDsaVariant::Shake_128s => 7856,
+            pqc::SlhDsaVariant::Sha2_128f | pqc::SlhDsaVariant::Shake_128f => 17_088,
+            pqc::SlhDsaVariant::Sha2_192s | pqc::SlhDsaVariant::Shake_192s => 16_224,
+            pqc::SlhDsaVariant::Sha2_192f | pqc::SlhDsaVariant::Shake_192f => 35_664,
+            pqc::SlhDsaVariant::Sha2_256s | pqc::SlhDsaVariant::Shake_256s => 29_792,
+            pqc::SlhDsaVariant::Sha2_256f | pqc::SlhDsaVariant::Shake_256f => 49_856,
+        })
     } else if pqc::is_hybrid_mechanism(mechanism) {
-        Some(49_856 + 104) // hybrid: PQC + ECDSA
+        Some(4 + 3309 + 104) // length prefix + ML-DSA-65 + DER P-256 ECDSA
     } else if pqc::is_hybrid_ed25519_mldsa65_mechanism(mechanism) {
         Some(3309 + 64 + 4) // ML-DSA-65 + Ed25519 + 4-byte length prefix
     } else {
@@ -5707,6 +6227,230 @@ pub extern "C" fn C_UnwrapKey(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// Upper bound on C_DeriveKey output-key-material length (raised from the old
+/// AES-only 32-byte assumption so generic-secret derivation is possible).
+const MAX_DERIVE_OUT: usize = 1024;
+
+/// Map a `CKD_SHA*_KDF` selector to the X9.63 KDF hash. Returns `None` for
+/// `CKD_NULL` (handled separately) and unsupported selectors (e.g. CKD_SHA1_KDF).
+fn ckd_to_kdf_hash(kdf: CK_ULONG) -> Option<crate::crypto::hkdf_mech::KdfHash> {
+    use crate::crypto::hkdf_mech::KdfHash;
+    match kdf {
+        CKD_SHA224_KDF => Some(KdfHash::Sha224),
+        CKD_SHA256_KDF => Some(KdfHash::Sha256),
+        CKD_SHA384_KDF => Some(KdfHash::Sha384),
+        CKD_SHA512_KDF => Some(KdfHash::Sha512),
+        _ => None,
+    }
+}
+
+/// Emit a one-time deprecation warning when C_DeriveKey is called with a bare
+/// EC_POINT parameter instead of a `CK_ECDH1_DERIVE_PARAMS` struct.
+fn warn_legacy_ecdh_param() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        tracing::warn!(
+            "C_DeriveKey: ECDH called with a bare EC_POINT parameter (legacy \
+             convention); prefer CK_ECDH1_DERIVE_PARAMS. Treating as CKD_NULL \
+             with no shared data."
+        );
+    });
+}
+
+/// Perform an ECDH1 key derivation for `C_DeriveKey`.
+///
+/// Parses the mechanism parameter (a conforming `CK_ECDH1_DERIVE_PARAMS`, or the
+/// legacy bare-EC_POINT form treated as `CKD_NULL`), computes the raw shared
+/// secret Z for the base key's curve, applies the KDF selected by the `kdf`
+/// field (`CKD_NULL` truncation or `CKD_SHA*_KDF` X9.63), and validates the
+/// result length against the target key type. Because both parties compute the
+/// same Z, both derive the same key — fixing the previous party-asymmetric HKDF.
+fn derive_ecdh(
+    p_mechanism: CK_MECHANISM_PTR,
+    bk_bytes: &[u8],
+    ec_params: &[u8],
+    requested_len: Option<usize>,
+    key_type: CK_ULONG,
+) -> Result<RawKeyMaterial, CK_RV> {
+    use crate::crypto::ec_extended::{self, ExtendedCurve};
+
+    // Parse parameter: conforming struct, or legacy bare EC_POINT (→ CKD_NULL).
+    let mech_param_len = unsafe { (*p_mechanism).parameter_len as usize };
+    let ecdh = if params::is_ecdh1_params_size(mech_param_len) {
+        unsafe { params::parse_ecdh1_params(p_mechanism) }?
+    } else {
+        let raw = extract_mechanism_param(p_mechanism);
+        if raw.is_empty() {
+            return Err(CKR_MECHANISM_PARAM_INVALID);
+        }
+        warn_legacy_ecdh_param();
+        params::Ecdh1Params {
+            kdf: CKD_NULL,
+            shared_data: Vec::new(),
+            public_data: raw,
+        }
+    };
+
+    // Raw shared secret Z for the base key's curve.
+    let raw_z: Zeroizing<Vec<u8>> = match ec_extended::curve_from_ec_params(ec_params) {
+        Some(ExtendedCurve::P521) => {
+            Zeroizing::new(ec_extended::p521_ecdh(bk_bytes, &ecdh.public_data).map_err(err_to_rv)?)
+        }
+        Some(ExtendedCurve::Secp256k1) => Zeroizing::new(
+            ec_extended::secp256k1_ecdh(bk_bytes, &ecdh.public_data).map_err(err_to_rv)?,
+        ),
+        Some(ExtendedCurve::X25519) => Zeroizing::new(
+            ec_extended::x25519_ecdh(bk_bytes, &ecdh.public_data).map_err(err_to_rv)?,
+        ),
+        None if is_p384_params(ec_params) => {
+            crate::crypto::derive::ecdh_p384_raw(bk_bytes, &ecdh.public_data).map_err(err_to_rv)?
+        }
+        None => {
+            crate::crypto::derive::ecdh_p256_raw(bk_bytes, &ecdh.public_data).map_err(err_to_rv)?
+        }
+    };
+
+    // Output length: CKA_VALUE_LEN, else a key-type default.
+    let out_len = match requested_len {
+        Some(l) => l,
+        None => match key_type {
+            CKK_AES => 32,
+            _ => raw_z.len(),
+        },
+    };
+    if out_len == 0 || out_len > MAX_DERIVE_OUT {
+        return Err(CKR_KEY_SIZE_RANGE);
+    }
+
+    // Apply the KDF selected by CK_ECDH1_DERIVE_PARAMS.kdf.
+    let derived: Vec<u8> = match ecdh.kdf {
+        CKD_NULL => {
+            // Leftmost `out_len` bytes of Z (SP 800-56A; matches SoftHSMv2).
+            if out_len > raw_z.len() {
+                return Err(CKR_KEY_SIZE_RANGE);
+            }
+            raw_z[..out_len].to_vec()
+        }
+        CKD_SHA224_KDF | CKD_SHA256_KDF | CKD_SHA384_KDF | CKD_SHA512_KDF => {
+            let h = ckd_to_kdf_hash(ecdh.kdf).ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+            crate::crypto::derive::x963_kdf(h, &raw_z, &ecdh.shared_data, out_len)
+                .map_err(err_to_rv)?
+        }
+        // CKD_SHA1_KDF and any other value are unsupported.
+        _ => return Err(CKR_MECHANISM_PARAM_INVALID),
+    };
+
+    // Validate the derived length against the target key type.
+    match key_type {
+        CKK_AES => {
+            if !matches!(derived.len(), 16 | 24 | 32) {
+                return Err(CKR_KEY_SIZE_RANGE);
+            }
+        }
+        CKK_GENERIC_SECRET => { /* any length in 1..=MAX_DERIVE_OUT is acceptable */ }
+        _ => return Err(CKR_TEMPLATE_INCONSISTENT),
+    }
+
+    Ok(RawKeyMaterial::new(derived))
+}
+
+/// Map an HKDF PRF hash mechanism (`CKM_SHA*`) to the `KdfHash` selector.
+fn hkdf_prf_to_hash(mech: CK_MECHANISM_TYPE) -> Option<crate::crypto::hkdf_mech::KdfHash> {
+    use crate::crypto::hkdf_mech::KdfHash;
+    match mech {
+        CKM_SHA224 => Some(KdfHash::Sha224),
+        CKM_SHA256 => Some(KdfHash::Sha256),
+        CKM_SHA384 => Some(KdfHash::Sha384),
+        CKM_SHA512 => Some(KdfHash::Sha512),
+        _ => None,
+    }
+}
+
+/// Perform an HKDF derivation (`CKM_HKDF_DERIVE`) for `C_DeriveKey`.
+///
+/// The base key supplies the input keying material (IKM). Parameters come from
+/// `CK_HKDF_PARAMS`: `bExtract`/`bExpand` select the stage(s), the salt is NULL,
+/// a byte array, or another key's value, and `pInfo` is the Expand context.
+fn derive_hkdf(
+    hsm: &HsmCore,
+    p_mechanism: CK_MECHANISM_PTR,
+    ikm: &[u8],
+    requested_len: Option<usize>,
+    key_type: CK_ULONG,
+) -> Result<RawKeyMaterial, CK_RV> {
+    use crate::crypto::hkdf_mech;
+
+    let plen = unsafe { (*p_mechanism).parameter_len as usize };
+    if !params::is_hkdf_params_size(plen) {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    let p = unsafe { params::parse_hkdf_params(p_mechanism) }?;
+    let hash = hkdf_prf_to_hash(p.prf_hash_mechanism).ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+
+    // Resolve the salt per its type.
+    let salt: Vec<u8> = match p.salt_type {
+        CKF_HKDF_SALT_NULL => Vec::new(),
+        CKF_HKDF_SALT_DATA => p.salt.clone(),
+        CKF_HKDF_SALT_KEY => {
+            let sk = hsm
+                .object_store
+                .get_object(p.salt_key as CK_OBJECT_HANDLE)
+                .map_err(err_to_rv)?;
+            let sk = sk.read();
+            match &sk.key_material {
+                Some(km) => km.as_bytes().to_vec(),
+                None => return Err(CKR_KEY_HANDLE_INVALID),
+            }
+        }
+        _ => return Err(CKR_MECHANISM_PARAM_INVALID),
+    };
+
+    // Output length: CKA_VALUE_LEN, else a key-type default.
+    let out_len = match requested_len {
+        Some(l) => l,
+        None => match key_type {
+            CKK_AES => 32,
+            _ => hash.output_len(),
+        },
+    };
+    if out_len == 0 || out_len > MAX_DERIVE_OUT {
+        return Err(CKR_KEY_SIZE_RANGE);
+    }
+
+    // Run the requested HKDF stage(s).
+    let okm: Vec<u8> = match (p.extract, p.expand) {
+        (true, true) => {
+            hkdf_mech::hkdf_derive(hash, &salt, ikm, &p.info, out_len).map_err(err_to_rv)?
+        }
+        (false, true) => {
+            // Expand-only: the base key is already the PRK.
+            hkdf_mech::hkdf_expand(hash, ikm, &p.info, out_len).map_err(err_to_rv)?
+        }
+        (true, false) => {
+            // Extract-only: output is the fixed-length PRK.
+            let prk = hkdf_mech::hkdf_extract(hash, &salt, ikm);
+            if out_len != prk.len() {
+                return Err(CKR_KEY_SIZE_RANGE);
+            }
+            prk
+        }
+        (false, false) => return Err(CKR_MECHANISM_PARAM_INVALID),
+    };
+
+    // Validate against the target key type.
+    match key_type {
+        CKK_AES => {
+            if !matches!(okm.len(), 16 | 24 | 32) {
+                return Err(CKR_KEY_SIZE_RANGE);
+            }
+        }
+        CKK_GENERIC_SECRET | CKK_HKDF => {}
+        _ => return Err(CKR_TEMPLATE_INCONSISTENT),
+    }
+
+    Ok(RawKeyMaterial::new(okm))
+}
+
 #[no_mangle]
 pub extern "C" fn C_DeriveKey(
     session: CK_SESSION_HANDLE,
@@ -5761,12 +6505,6 @@ pub extern "C" fn C_DeriveKey(
         let bk_sensitive = bk_obj.sensitive;
         drop(bk_obj);
 
-        // The mechanism parameter contains the peer public key (ECDH) or ciphertext (KEM)
-        let mech_param = extract_mechanism_param(p_mechanism);
-        if mech_param.is_empty() {
-            return CKR_MECHANISM_PARAM_INVALID;
-        }
-
         let template = if p_template.is_null() {
             vec![]
         } else {
@@ -5776,49 +6514,48 @@ pub extern "C" fn C_DeriveKey(
             }
         };
 
-        // Parse CKA_VALUE_LEN early so ECDH can derive exactly the right length
-        // via HKDF, avoiding unnecessary truncation of the derived secret.
+        // Desired output length (CKA_VALUE_LEN) and key type (default AES).
+        // Length is validated per key type inside the derivation — not forced to
+        // an AES size here — so CKK_GENERIC_SECRET outputs are possible.
         let requested_len = read_ulong_attr(&template, CKA_VALUE_LEN).map(|v| v as usize);
+        let requested_key_type = read_ulong_attr(&template, CKA_KEY_TYPE).unwrap_or(CKK_AES);
 
-        // Validate requested length is a valid AES key size
-        if let Some(req_len) = requested_len {
-            if req_len != 16 && req_len != 24 && req_len != 32 {
-                return CKR_KEY_SIZE_RANGE;
-            }
-        }
-
-        let shared_secret = if let Some(variant) = pqc::mechanism_to_ml_kem_variant(mechanism) {
-            // ML-KEM decapsulation: base key is dk seed, param is ciphertext
-            match pqc::ml_kem_decapsulate(&bk_bytes, &mech_param, variant) {
-                Ok(ss) => RawKeyMaterial::new(ss),
-                Err(e) => return err_to_rv(e),
-            }
-        } else if is_p384_params(&ec_params) {
-            match hsm
-                .crypto_backend
-                .ecdh_p384(&bk_bytes, &mech_param, requested_len)
-            {
-                Ok(s) => s,
-                Err(e) => return err_to_rv(e),
-            }
-        } else {
-            match hsm
-                .crypto_backend
-                .ecdh_p256(&bk_bytes, &mech_param, requested_len)
-            {
-                Ok(s) => s,
-                Err(e) => return err_to_rv(e),
-            }
-        };
-
-        // Validate the derived secret is a valid AES key size
-        let shared_secret = {
-            let slen = shared_secret.len();
-            if slen != 16 && slen != 24 && slen != 32 {
-                return CKR_KEY_SIZE_RANGE;
-            }
-            shared_secret
-        };
+        let shared_secret: RawKeyMaterial =
+            if let Some(variant) = pqc::mechanism_to_ml_kem_variant(mechanism) {
+                // ML-KEM decapsulation: base key is dk seed, param is ciphertext.
+                let ct = extract_mechanism_param(p_mechanism);
+                if ct.is_empty() {
+                    return CKR_MECHANISM_PARAM_INVALID;
+                }
+                match pqc::ml_kem_decapsulate(&bk_bytes, &ct, variant) {
+                    Ok(ss) => RawKeyMaterial::new(ss),
+                    Err(e) => return err_to_rv(e),
+                }
+            } else if mechanism == CKM_HKDF_DERIVE {
+                // HKDF: base key is the input keying material.
+                match derive_hkdf(
+                    &hsm,
+                    p_mechanism,
+                    &bk_bytes,
+                    requested_len,
+                    requested_key_type,
+                ) {
+                    Ok(km) => km,
+                    Err(rv) => return rv,
+                }
+            } else {
+                // ECDH1 derive (CKM_ECDH1_DERIVE / CKM_ECDH1_COFACTOR_DERIVE).
+                match derive_ecdh(
+                    p_mechanism,
+                    &bk_bytes,
+                    &ec_params,
+                    requested_len,
+                    requested_key_type,
+                ) {
+                    Ok(km) => km,
+                    Err(rv) => return rv,
+                }
+            };
 
         let handle = match hsm.object_store.next_handle() {
             Ok(h) => h,
@@ -5826,13 +6563,21 @@ pub extern "C" fn C_DeriveKey(
         };
         let secret_len = shared_secret.len();
         let mut obj = StoredObject::new(handle, CKO_SECRET_KEY);
-        obj.key_type = Some(CKK_AES);
+        obj.key_type = Some(requested_key_type);
         obj.key_material = Some(shared_secret);
         obj.value_len = Some(secret_len as CK_ULONG);
         obj.sensitive = true;
         obj.extractable = false;
-        obj.can_encrypt = true;
-        obj.can_decrypt = true;
+        // AES keys are encrypt/decrypt-capable; generic secrets are usable as
+        // KDF/MAC base keys (derive + sign/verify).
+        if requested_key_type == CKK_AES {
+            obj.can_encrypt = true;
+            obj.can_decrypt = true;
+        } else {
+            obj.can_derive = true;
+            obj.can_sign = true;
+            obj.can_verify = true;
+        }
 
         for (attr_type, value) in &template {
             match *attr_type {

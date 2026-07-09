@@ -244,13 +244,21 @@ fn read_rsa_public_components(
 }
 
 /// Encrypt plaintext using OAEP via the internal crypto module.
-/// This is needed because the ABI's C_Encrypt has a limitation where public keys
-/// (which have can_encrypt but no key_material) fail at the key_material extraction
-/// step before reaching the OAEP code path. We use the internal API for encryption
-/// and the C ABI for decryption to still exercise the ABI decrypt path.
+/// (The ABI's C_Encrypt now also supports public-key OAEP — see
+/// tests/oaep_params_abi.rs — but this helper keeps exercising the internal
+/// path for the decrypt-focused tests below.) MGF1 = SHA-256, empty label.
 fn oaep_encrypt_via_internal(modulus: &[u8], pub_exp: &[u8], plaintext: &[u8]) -> Vec<u8> {
-    crypto_sign::rsa_oaep_encrypt(modulus, pub_exp, plaintext, OaepHash::Sha256)
-        .expect("Internal OAEP encrypt failed")
+    crypto_sign::rsa_oaep_encrypt(
+        modulus,
+        pub_exp,
+        plaintext,
+        OaepHash::Sha256,
+        OaepHash::Sha256,
+        &[],
+    )
+    .expect("Internal OAEP encrypt failed")
+    .into_iter()
+    .collect()
 }
 
 // ============================================================================
